@@ -61,8 +61,8 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 		t.log.Printf("[CLAUDE] Failed to send ack to %s: %v", chatJID, err)
 	}
 
-	// fetch last 10 messages for context
-	messages, err := t.getHistory(chatJID, 10, 0)
+	// fetch last 100 messages for context
+	messages, err := t.getHistory(chatJID, 100, 0)
 	if err != nil {
 		t.log.Printf("[CLAUDE] Failed to get history for %s: %v", chatJID, err)
 		t.sendMsg(ctx, chatJID, "Sorry, I couldn't load the conversation history.")
@@ -93,7 +93,7 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	var b strings.Builder
 
 	b.WriteString("You are responding to a WhatsApp message. A user mentioned @claude in a WhatsApp chat.\n\n")
-	b.WriteString("Here are the last messages from this chat for context:\n\n")
+	b.WriteString("Here are the last 100 messages from this chat for context:\n\n")
 
 	// messages come newest-first from DB, display oldest-first
 	for i := len(messages) - 1; i >= 0; i-- {
