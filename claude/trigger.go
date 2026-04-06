@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"whatsapp-mcp/storage"
 )
@@ -145,14 +146,15 @@ const signature = "\n\n— _sent by @claude_ 🤖"
 
 // Trigger handles spawning headless Claude Code CLI instances for @claude mentions.
 type Trigger struct {
-	config      TriggerConfig
-	sendMsg     func(ctx context.Context, chatJID string, text string) error
-	sendMsgID   func(ctx context.Context, chatJID string, text string) (string, error)
-	revokeMsg   func(ctx context.Context, chatJID string, messageID string) error
-	editMsg     func(ctx context.Context, chatJID string, messageID string, newText string) error
-	getHistory  func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
-	isTrusted   func(jid string) (bool, error)
-	log         *log.Logger
+	config     TriggerConfig
+	sendMsg    func(ctx context.Context, chatJID string, text string) error
+	sendMsgID  func(ctx context.Context, chatJID string, text string) (string, error)
+	revokeMsg  func(ctx context.Context, chatJID string, messageID string) error
+	editMsg    func(ctx context.Context, chatJID string, messageID string, newText string) error
+	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
+	isTrusted  func(jid string) (bool, error)
+	sessionMgr *SessionManager
+	log        *log.Logger
 }
 
 // NewTrigger creates a new Claude trigger.
@@ -164,6 +166,7 @@ func NewTrigger(
 	editMsg func(ctx context.Context, chatJID string, messageID string, newText string) error,
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error),
 	isTrusted func(jid string) (bool, error),
+	sessionMgr *SessionManager,
 ) *Trigger {
 	return &Trigger{
 		config:     config,
@@ -173,6 +176,7 @@ func NewTrigger(
 		editMsg:    editMsg,
 		getHistory: getHistory,
 		isTrusted:  isTrusted,
+		sessionMgr: sessionMgr,
 		log:        log.Default(),
 	}
 }
@@ -195,29 +199,113 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 		}
 	}
 
-	// send randomized acknowledgment (track ID for later deletion)
+	// send randomized acknowledgment BEFORE lock (immediate user feedback)
 	ack := thinkingMessages[rand.Intn(len(thinkingMessages))]
 	ackID, ackErr := t.sendMsgID(ctx, chatJID, ack)
 	if ackErr != nil {
 		t.log.Printf("[CLAUDE] Failed to send ack to %s: %v", chatJID, ackErr)
 	}
 
+	// acquire per-chat lock — serializes @claude processing for this chat
+	// other chats still run in parallel
+	chatLock := t.sessionMgr.GetChatLock(chatJID)
+	chatLock.Lock()
+	defer chatLock.Unlock()
+
 	// fetch last 100 messages for context
 	messages, err := t.getHistory(chatJID, 100, 0)
 	if err != nil {
 		t.log.Printf("[CLAUDE] Failed to get history for %s: %v", chatJID, err)
-		t.sendMsg(ctx, chatJID, "Sorry, I couldn't load the conversation history."+signature)
+		t.trySendError(ctx, chatJID, ackID, ackErr)
+		return
+	}
+	if len(messages) == 0 {
+		t.log.Printf("[CLAUDE] No messages found for %s", chatJID)
+		t.trySendError(ctx, chatJID, ackID, ackErr)
 		return
 	}
 
-	// build prompt and execute
-	prompt := t.buildPrompt(chatJID, messages, text, senderName)
-	output, err := t.execClaude(ctx, prompt)
-	if err != nil {
-		t.log.Printf("[CLAUDE] CLI execution failed for %s: %v", chatJID, err)
-		t.sendMsg(ctx, chatJID, "Sorry, something went wrong while processing your request."+signature)
-		return
+	// determine session state: resume existing or start new
+	session := t.sessionMgr.GetSession(chatJID)
+	var isResume bool
+	var sessionID string
+	var promptMessages []storage.MessageWithNames
+
+	if session != nil {
+		// messages[0] is newest, messages[len-1] is oldest
+		newOldest := messages[len(messages)-1].Timestamp
+
+		if !newOldest.After(session.NewestMsgTime) {
+			// overlap exists — only send messages newer than what Claude already saw
+			isResume = true
+			sessionID = session.SessionID
+
+			for _, msg := range messages {
+				if msg.Timestamp.After(session.NewestMsgTime) {
+					promptMessages = append(promptMessages, msg)
+				}
+			}
+
+			// edge case: no genuinely new messages — fall back to new session
+			if len(promptMessages) == 0 {
+				isResume = false
+				sessionID = NewSessionID()
+				promptMessages = messages
+			}
+		} else {
+			// no overlap — new session
+			sessionID = NewSessionID()
+			promptMessages = messages
+		}
+	} else {
+		// no existing session
+		sessionID = NewSessionID()
+		promptMessages = messages
 	}
+
+	// build the appropriate prompt
+	var prompt string
+	if isResume {
+		t.log.Printf("[CLAUDE] Resuming session %s for chat %s (%d new messages)",
+			sessionID, chatJID, len(promptMessages))
+		prompt = t.buildResumePrompt(chatJID, promptMessages, text, senderName)
+	} else {
+		t.log.Printf("[CLAUDE] New session %s for chat %s (%d messages)",
+			sessionID, chatJID, len(promptMessages))
+		prompt = t.buildPrompt(chatJID, promptMessages, text, senderName)
+	}
+
+	// execute Claude CLI
+	output, err := t.execClaude(ctx, prompt, sessionID, isResume)
+	if err != nil {
+		t.log.Printf("[CLAUDE] CLI failed for %s (session=%s, resume=%v): %v",
+			chatJID, sessionID, isResume, err)
+
+		// if resume failed, retry with a fresh session
+		if isResume {
+			t.log.Printf("[CLAUDE] Retrying with fresh session for %s", chatJID)
+			t.sessionMgr.ClearSession(chatJID)
+
+			sessionID = NewSessionID()
+			prompt = t.buildPrompt(chatJID, messages, text, senderName)
+			output, err = t.execClaude(ctx, prompt, sessionID, false)
+			if err != nil {
+				t.log.Printf("[CLAUDE] Fresh session also failed for %s: %v", chatJID, err)
+				t.trySendError(ctx, chatJID, ackID, ackErr)
+				return
+			}
+		} else {
+			t.trySendError(ctx, chatJID, ackID, ackErr)
+			return
+		}
+	}
+
+	// update session state on success
+	t.sessionMgr.SetSession(chatJID, &ChatSession{
+		SessionID:     sessionID,
+		NewestMsgTime: messages[0].Timestamp, // newest message in the full batch
+		LastUsed:      time.Now(),
+	})
 
 	// edit the thinking message with the actual response
 	output = strings.TrimSpace(output)
@@ -226,7 +314,6 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 		if ackErr == nil && ackID != "" {
 			if err := t.editMsg(ctx, chatJID, ackID, response); err != nil {
 				t.log.Printf("[CLAUDE] Failed to edit ack message %s, sending new: %v", ackID, err)
-				// fallback: send as new message if edit fails
 				t.sendMsg(ctx, chatJID, response)
 			}
 		} else {
@@ -235,7 +322,19 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 	}
 }
 
-// buildPrompt constructs the prompt for the headless Claude instance.
+// trySendError sends an error message, editing the ack if possible.
+func (t *Trigger) trySendError(ctx context.Context, chatJID, ackID string, ackErr error) {
+	errMsg := "Sorry, something went wrong while processing your request." + signature
+	if ackErr == nil && ackID != "" {
+		if err := t.editMsg(ctx, chatJID, ackID, errMsg); err != nil {
+			t.sendMsg(ctx, chatJID, errMsg)
+		}
+	} else {
+		t.sendMsg(ctx, chatJID, errMsg)
+	}
+}
+
+// buildPrompt constructs the full prompt for a new session.
 func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithNames, triggerText, senderName string) string {
 	var b strings.Builder
 
@@ -250,9 +349,43 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 		fmt.Fprintf(&b, "This chat is with: %s\n\n", chatName)
 	}
 
-	b.WriteString("Here are the last 100 messages from this chat for context:\n")
+	fmt.Fprintf(&b, "Here are the last %d messages from this chat for context:\n", len(messages))
 	b.WriteString("Messages from \"Steve\" are from the WhatsApp account owner.\n\n")
 
+	t.writeMessages(&b, messages)
+
+	b.WriteString("\n---\n\n")
+	fmt.Fprintf(&b, "The message that triggered you (from %s):\n%s\n\n", senderName, triggerText)
+	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
+	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
+	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
+	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
+	b.WriteString("You may use other WhatsApp tools (search_messages, get_chat_messages, find_chat, etc.) if the user's request requires looking up information.\n")
+
+	return b.String()
+}
+
+// buildResumePrompt constructs a lighter prompt with only new messages for session resumption.
+func (t *Trigger) buildResumePrompt(chatJID string, messages []storage.MessageWithNames, triggerText, senderName string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Here are %d new messages since we last spoke in this chat:\n\n", len(messages))
+
+	t.writeMessages(&b, messages)
+
+	b.WriteString("\n---\n\n")
+	fmt.Fprintf(&b, "The message that triggered you (from %s):\n%s\n\n", senderName, triggerText)
+	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
+	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
+	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response.\n")
+	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly.\n")
+	b.WriteString("You may use other WhatsApp tools if needed.\n")
+
+	return b.String()
+}
+
+// writeMessages formats messages oldest-first into the builder.
+func (t *Trigger) writeMessages(b *strings.Builder, messages []storage.MessageWithNames) {
 	// messages come newest-first from DB, display oldest-first
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
@@ -269,21 +402,11 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 			}
 		}
 
-		fmt.Fprintf(&b, "[%s] %s: %s\n",
+		fmt.Fprintf(b, "[%s] %s: %s\n",
 			msg.Timestamp.Format("2006-01-02 15:04:05"),
 			sender,
 			msg.Text)
 	}
-
-	b.WriteString("\n---\n\n")
-	fmt.Fprintf(&b, "The message that triggered you (from %s):\n%s\n\n", senderName, triggerText)
-	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
-	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
-	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
-	b.WriteString("You may use other WhatsApp tools (search_messages, get_chat_messages, find_chat, etc.) if the user's request requires looking up information.\n")
-
-	return b.String()
 }
 
 // writeMCPConfig writes a temporary MCP config file for the spawned Claude instance
@@ -312,7 +435,7 @@ func (t *Trigger) writeMCPConfig() (string, error) {
 }
 
 // execClaude spawns the Claude CLI and returns its output.
-func (t *Trigger) execClaude(ctx context.Context, prompt string) (string, error) {
+func (t *Trigger) execClaude(ctx context.Context, prompt string, sessionID string, isResume bool) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, t.config.Timeout)
 	defer cancel()
 
@@ -335,10 +458,18 @@ func (t *Trigger) execClaude(ctx context.Context, prompt string) (string, error)
 		args = append(args, "--max-budget-usd", t.config.MaxBudget)
 	}
 
+	// session management: --session-id for new, --resume for existing
+	if isResume {
+		args = append(args, "--resume", sessionID)
+	} else if sessionID != "" {
+		args = append(args, "--session-id", sessionID)
+	}
+
 	// --mcp-config is variadic so it must be last before we pipe the prompt via stdin
 	args = append(args, "--mcp-config", mcpConfigPath)
 
-	t.log.Printf("[CLAUDE] Spawning: %s (model=%s, mcp=%s)", t.config.ClaudePath, t.config.Model, mcpConfigPath)
+	t.log.Printf("[CLAUDE] Spawning: %s (model=%s, session=%s, resume=%v)",
+		t.config.ClaudePath, t.config.Model, sessionID, isResume)
 
 	cmd := exec.CommandContext(ctx, t.config.ClaudePath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
