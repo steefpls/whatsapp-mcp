@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,25 +14,51 @@ import (
 	"whatsapp-mcp/storage"
 )
 
+// thinkingMessages are randomly selected when Claude starts processing a request.
+var thinkingMessages = []string{
+	"🤖 Claude is thinking...",
+	"🧠 Claude is on it...",
+	"⚡ Claude is cooking something up...",
+	"🔮 Claude is consulting the oracle...",
+	"💭 Claude is pondering...",
+	"🛠️ Claude is working on it...",
+	"🌀 Claude has entered the chat...",
+	"🎯 Claude is locked in...",
+	"🤔 Claude is processing...",
+	"✨ Claude is doing its thing...",
+}
+
+// signature is appended to every Claude response for attribution.
+const signature = "\n\n— _sent by @claude_ 🤖"
+
 // Trigger handles spawning headless Claude Code CLI instances for @claude mentions.
 type Trigger struct {
-	config     TriggerConfig
-	sendMsg    func(ctx context.Context, chatJID string, text string) error
-	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
-	isTrusted  func(jid string) (bool, error)
-	log        *log.Logger
+	config      TriggerConfig
+	sendMsg     func(ctx context.Context, chatJID string, text string) error
+	sendMsgID   func(ctx context.Context, chatJID string, text string) (string, error)
+	revokeMsg   func(ctx context.Context, chatJID string, messageID string) error
+	editMsg     func(ctx context.Context, chatJID string, messageID string, newText string) error
+	getHistory  func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
+	isTrusted   func(jid string) (bool, error)
+	log         *log.Logger
 }
 
 // NewTrigger creates a new Claude trigger.
 func NewTrigger(
 	config TriggerConfig,
 	sendMsg func(ctx context.Context, chatJID string, text string) error,
+	sendMsgID func(ctx context.Context, chatJID string, text string) (string, error),
+	revokeMsg func(ctx context.Context, chatJID string, messageID string) error,
+	editMsg func(ctx context.Context, chatJID string, messageID string, newText string) error,
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error),
 	isTrusted func(jid string) (bool, error),
 ) *Trigger {
 	return &Trigger{
 		config:     config,
 		sendMsg:    sendMsg,
+		sendMsgID:  sendMsgID,
+		revokeMsg:  revokeMsg,
+		editMsg:    editMsg,
 		getHistory: getHistory,
 		isTrusted:  isTrusted,
 		log:        log.Default(),
@@ -56,16 +83,18 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 		}
 	}
 
-	// send acknowledgment
-	if err := t.sendMsg(ctx, chatJID, "Got it, thinking..."); err != nil {
-		t.log.Printf("[CLAUDE] Failed to send ack to %s: %v", chatJID, err)
+	// send randomized acknowledgment (track ID for later deletion)
+	ack := thinkingMessages[rand.Intn(len(thinkingMessages))]
+	ackID, ackErr := t.sendMsgID(ctx, chatJID, ack)
+	if ackErr != nil {
+		t.log.Printf("[CLAUDE] Failed to send ack to %s: %v", chatJID, ackErr)
 	}
 
 	// fetch last 100 messages for context
 	messages, err := t.getHistory(chatJID, 100, 0)
 	if err != nil {
 		t.log.Printf("[CLAUDE] Failed to get history for %s: %v", chatJID, err)
-		t.sendMsg(ctx, chatJID, "Sorry, I couldn't load the conversation history.")
+		t.sendMsg(ctx, chatJID, "Sorry, I couldn't load the conversation history."+signature)
 		return
 	}
 
@@ -74,16 +103,22 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 	output, err := t.execClaude(ctx, prompt)
 	if err != nil {
 		t.log.Printf("[CLAUDE] CLI execution failed for %s: %v", chatJID, err)
-		t.sendMsg(ctx, chatJID, "Sorry, something went wrong while processing your request.")
+		t.sendMsg(ctx, chatJID, "Sorry, something went wrong while processing your request."+signature)
 		return
 	}
 
-	// send response if Claude produced text output
-	// (Claude may have already sent messages via the WhatsApp MCP send_message tool)
+	// edit the thinking message with the actual response
 	output = strings.TrimSpace(output)
 	if output != "" {
-		if err := t.sendMsg(ctx, chatJID, output); err != nil {
-			t.log.Printf("[CLAUDE] Failed to send response to %s: %v", chatJID, err)
+		response := output + signature
+		if ackErr == nil && ackID != "" {
+			if err := t.editMsg(ctx, chatJID, ackID, response); err != nil {
+				t.log.Printf("[CLAUDE] Failed to edit ack message %s, sending new: %v", ackID, err)
+				// fallback: send as new message if edit fails
+				t.sendMsg(ctx, chatJID, response)
+			}
+		} else {
+			t.sendMsg(ctx, chatJID, response)
 		}
 	}
 }
@@ -93,20 +128,33 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	var b strings.Builder
 
 	b.WriteString("You are responding to a WhatsApp message. A user mentioned @claude in a WhatsApp chat.\n\n")
-	b.WriteString("Here are the last 100 messages from this chat for context:\n\n")
+
+	// determine the chat name from messages for context
+	chatName := ""
+	if len(messages) > 0 {
+		chatName = messages[0].ChatName
+	}
+	if chatName != "" {
+		fmt.Fprintf(&b, "This chat is with: %s\n\n", chatName)
+	}
+
+	b.WriteString("Here are the last 100 messages from this chat for context:\n")
+	b.WriteString("Messages from \"Steve\" are from the WhatsApp account owner.\n\n")
 
 	// messages come newest-first from DB, display oldest-first
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		sender := msg.SenderContactName
-		if sender == "" {
-			sender = msg.SenderPushName
-		}
-		if sender == "" {
-			sender = msg.SenderJID
-		}
+		var sender string
 		if msg.IsFromMe {
-			sender = "Me (WhatsApp owner)"
+			sender = "Steve"
+		} else {
+			sender = msg.SenderContactName
+			if sender == "" {
+				sender = msg.SenderPushName
+			}
+			if sender == "" {
+				sender = msg.SenderJID
+			}
 		}
 
 		fmt.Fprintf(&b, "[%s] %s: %s\n",

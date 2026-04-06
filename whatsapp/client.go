@@ -205,9 +205,15 @@ func (c *Client) GetQRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelIt
 
 // SendTextMessage sends a text message to a chat.
 func (c *Client) SendTextMessage(ctx context.Context, chatJID string, text string) error {
+	_, err := c.SendTextMessageWithID(ctx, chatJID, text)
+	return err
+}
+
+// SendTextMessageWithID sends a text message and returns the message ID.
+func (c *Client) SendTextMessageWithID(ctx context.Context, chatJID string, text string) (string, error) {
 	targetJID, err := types.ParseJID(chatJID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	resp, err := c.wa.SendMessage(ctx, targetJID, &waE2E.Message{
@@ -215,7 +221,7 @@ func (c *Client) SendTextMessage(ctx context.Context, chatJID string, text strin
 	})
 
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	c.store.SaveMessage(storage.Message{
@@ -228,7 +234,33 @@ func (c *Client) SendTextMessage(ctx context.Context, chatJID string, text strin
 		MessageType: "text",
 	})
 
-	return nil
+	return resp.ID, nil
+}
+
+// RevokeMessage deletes a message for everyone in the chat.
+func (c *Client) RevokeMessage(ctx context.Context, chatJID string, messageID string) error {
+	targetJID, err := types.ParseJID(chatJID)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.wa.RevokeMessage(ctx, targetJID, messageID)
+	return err
+}
+
+// EditMessage edits a previously sent message.
+func (c *Client) EditMessage(ctx context.Context, chatJID string, messageID string, newText string) error {
+	targetJID, err := types.ParseJID(chatJID)
+	if err != nil {
+		return err
+	}
+
+	editMsg := c.wa.BuildEdit(targetJID, messageID, &waE2E.Message{
+		Conversation: proto.String(newText),
+	})
+
+	_, err = c.wa.SendMessage(ctx, targetJID, editMsg)
+	return err
 }
 
 // RequestHistorySync requests additional message history from WhatsApp.
