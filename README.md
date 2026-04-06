@@ -45,10 +45,11 @@ AI:  *reads context, sends reply* → "Sent! I've proposed Thursday at noon"
 
 This server implements the full MCP specification with:
 
-- **7 Tools** for WhatsApp operations
+- **10 Tools** for WhatsApp operations
 - **4 Prompts** for common workflows
 - **4 Resources** for interactive guides
 - **Server Instructions** for optimal AI interactions
+- **@claude Trigger** - Mention `@claude` in any chat to get an AI response
 
 #### Tools
 
@@ -61,6 +62,9 @@ This server implements the full MCP specification with:
 | `send_message` | Send WhatsApp messages | To any chat or group |
 | `load_more_messages` | Fetch older history | On-demand from servers |
 | `get_my_info` | Get your profile info | JID, name, status, picture |
+| `add_trusted_user` | Trust a user for @claude | Authorize @claude triggers |
+| `remove_trusted_user` | Revoke @claude access | Remove trusted user |
+| `list_trusted_users` | List trusted users | View authorized users |
 
 #### Prompts
 
@@ -258,6 +262,13 @@ AI: [Uses search_keyword prompt]
     → Orders by relevance/date
 ```
 
+### @claude Trigger
+```
+Friend: "@claude what's the capital of France?"
+Claude: "Paris! The City of Light 🇫🇷"
+```
+Mention `@claude` in any WhatsApp chat and a headless Claude instance will read the last 10 messages for context and respond. The owner can always trigger it; other users need to be added to the trusted list via `add_trusted_user`.
+
 ## 📊 Data & Privacy
 
 ### Local Storage
@@ -284,6 +295,8 @@ All data is stored in `./data/`:
 - [x] Timezone support
 - [x] On-demand message loading from servers
 - [x] Docker deployment (with healthcheck!)
+- [x] @claude trigger — mention `@claude` in any chat to get an AI response
+- [x] Trusted user access control for @claude trigger
 
 ### 🚧 Planned
 
@@ -325,6 +338,20 @@ The server includes interactive guides accessible through MCP:
 
 AI assistants can access these guides through the MCP Resources API.
 
+### @claude Trigger Configuration
+
+The `@claude` trigger feature spawns a headless Claude Code CLI instance when someone mentions `@claude` in a WhatsApp message.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_TRIGGER_ENABLED` | `false` | Enable/disable the @claude trigger |
+| `CLAUDE_PATH` | `claude` | Path to the Claude CLI binary |
+| `CLAUDE_MODEL` | *(default)* | Model override (e.g., `sonnet`, `opus`) |
+| `CLAUDE_MAX_BUDGET_USD` | `1.00` | Max spend per invocation (empty = no limit) |
+| `CLAUDE_TIMEOUT_SECONDS` | `120` | Max seconds to wait for a response |
+
+**Access control:** The WhatsApp account owner can always trigger `@claude`. Other users must be added via the `add_trusted_user` MCP tool. Untrusted users get a polite rejection message.
+
 ### Environment Variables
 
 See `.env.example` and be happy!
@@ -361,6 +388,6 @@ This project is **not affiliated with WhatsApp or Meta**. It uses the unofficial
 
 **Built with ❤️ for the MCP community**
 
-[Report Bug](https://github.com/felipeadeildo/whatsapp-mcp/issues) • [Request Feature](https://github.com/felipeadeildo/whatsapp-mcp/issues)
+[Report Bug](https://github.com/steefpls/whatsapp-mcp/issues) • [Request Feature](https://github.com/steefpls/whatsapp-mcp/issues)
 
 </div>

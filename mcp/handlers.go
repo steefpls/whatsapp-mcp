@@ -570,3 +570,51 @@ func (m *MCPServer) handleGetMyInfo(ctx context.Context, request mcp.CallToolReq
 
 	return mcp.NewToolResultText(result.String()), nil
 }
+
+// handleAddTrustedUser handles the add_trusted_user tool request.
+func (m *MCPServer) handleAddTrustedUser(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	jid, err := request.RequireString("jid")
+	if err != nil {
+		return mcp.NewToolResultError("jid parameter is required"), nil
+	}
+
+	if err := m.trustedUserStore.AddTrustedUser(jid); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to add trusted user: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Added %s to trusted users list. They can now trigger @claude in messages.", jid)), nil
+}
+
+// handleRemoveTrustedUser handles the remove_trusted_user tool request.
+func (m *MCPServer) handleRemoveTrustedUser(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	jid, err := request.RequireString("jid")
+	if err != nil {
+		return mcp.NewToolResultError("jid parameter is required"), nil
+	}
+
+	if err := m.trustedUserStore.RemoveTrustedUser(jid); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to remove trusted user: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Removed %s from trusted users list.", jid)), nil
+}
+
+// handleListTrustedUsers handles the list_trusted_users tool request.
+func (m *MCPServer) handleListTrustedUsers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	users, err := m.trustedUserStore.ListTrustedUsers()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to list trusted users: %v", err)), nil
+	}
+
+	var result strings.Builder
+	if len(users) == 0 {
+		result.WriteString("No trusted users configured. Use add_trusted_user to allow users to trigger @claude.")
+	} else {
+		fmt.Fprintf(&result, "Trusted users (%d):\n\n", len(users))
+		for i, user := range users {
+			fmt.Fprintf(&result, "%d. %s (added: %s)\n", i+1, user.JID, m.formatDateTime(user.AddedAt))
+		}
+	}
+
+	return mcp.NewToolResultText(result.String()), nil
+}

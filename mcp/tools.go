@@ -114,4 +114,36 @@ func (m *MCPServer) registerTools() {
 		),
 		m.handleGetMyInfo,
 	)
+
+	// 8. add trusted user for @claude trigger
+	m.server.AddTool(
+		mcp.NewTool("add_trusted_user",
+			mcp.WithDescription("Add a WhatsApp user to the trusted users list, allowing them to trigger @claude in messages."),
+			mcp.WithString("jid",
+				mcp.Required(),
+				mcp.Description("WhatsApp JID of the user to trust (e.g., 6591234567@s.whatsapp.net)"),
+			),
+		),
+		m.handleAddTrustedUser,
+	)
+
+	// 9. remove trusted user
+	m.server.AddTool(
+		mcp.NewTool("remove_trusted_user",
+			mcp.WithDescription("Remove a WhatsApp user from the trusted users list, revoking their ability to trigger @claude."),
+			mcp.WithString("jid",
+				mcp.Required(),
+				mcp.Description("WhatsApp JID of the user to remove from trusted list"),
+			),
+		),
+		m.handleRemoveTrustedUser,
+	)
+
+	// 10. list trusted users
+	m.server.AddTool(
+		mcp.NewTool("list_trusted_users",
+			mcp.WithDescription("List all WhatsApp users who are authorized to trigger @claude in messages."),
+		),
+		m.handleListTrustedUsers,
+	)
 }

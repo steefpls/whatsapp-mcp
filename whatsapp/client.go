@@ -22,12 +22,18 @@ type WebhookManager interface {
 	EmitMessageEvent(msg storage.MessageWithNames) error
 }
 
+// ClaudeTrigger defines the interface for handling @claude mentions in messages.
+type ClaudeTrigger interface {
+	HandleTrigger(ctx context.Context, chatJID, senderJID, text, senderName string, isFromMe bool)
+}
+
 // Client wraps the WhatsApp client with additional functionality.
 type Client struct {
 	wa               *whatsmeow.Client
 	store            *storage.MessageStore
 	mediaStore       *storage.MediaStore
 	webhookManager   WebhookManager // optional webhook manager
+	claudeTrigger    ClaudeTrigger  // optional @claude trigger handler
 	mediaConfig      MediaConfig
 	log              waLog.Logger
 	logFile          *os.File
@@ -35,6 +41,11 @@ type Client struct {
 	historySyncMux   sync.Mutex           // protects the map
 	ctx              context.Context      // client lifecycle context
 	cancel           context.CancelFunc   // cancel function to stop all goroutines
+}
+
+// SetClaudeTrigger configures the @claude trigger handler.
+func (c *Client) SetClaudeTrigger(trigger ClaudeTrigger) {
+	c.claudeTrigger = trigger
 }
 
 // fileLogger wraps a logger to write to both stdout and a file.

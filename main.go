@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"whatsapp-mcp/claude"
 	"whatsapp-mcp/mcp"
 	"whatsapp-mcp/paths"
 	"whatsapp-mcp/storage"
@@ -107,6 +108,9 @@ func main() {
 	mediaStore := storage.NewMediaStore(db)
 	log.Println("Media storage initialized")
 
+	trustedUserStore := storage.NewTrustedUserStore(db)
+	log.Println("Trusted user storage initialized")
+
 	// initialize webhook system
 	webhookConfig := webhook.LoadConfig()
 	webhookStore := storage.NewWebhookStore(db)
@@ -172,8 +176,18 @@ func main() {
 		log.Println("Connected to WhatsApp")
 	}
 
+	// initialize @claude trigger
+	claudeConfig := claude.LoadConfig()
+	if claudeConfig.Enabled {
+		trigger := claude.NewTrigger(claudeConfig, waClient.SendTextMessage, store.GetChatMessagesWithNames, trustedUserStore.IsTrusted)
+		waClient.SetClaudeTrigger(trigger)
+		log.Println("@claude trigger enabled")
+	} else {
+		log.Println("@claude trigger disabled (set CLAUDE_TRIGGER_ENABLED=true to enable)")
+	}
+
 	// initialize MCP server
-	mcpServer := mcp.NewMCPServer(waClient, store, mediaStore, timezone)
+	mcpServer := mcp.NewMCPServer(waClient, store, mediaStore, trustedUserStore, timezone)
 	log.Println("MCP server initialized")
 
 	mux := http.NewServeMux()

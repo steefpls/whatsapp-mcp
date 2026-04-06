@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -405,6 +406,17 @@ func (c *Client) handleMessage(evt *events.Message) {
 
 	if err := c.processMessageData(ctx, data); err != nil {
 		return
+	}
+
+	// check for @claude trigger
+	if c.claudeTrigger != nil && strings.Contains(strings.ToLower(data.Text), "@claude") {
+		chatJID := c.normalizeJID(data.ChatJID)
+		senderJID := c.normalizeJID(data.SenderJID)
+		senderName := data.PushName
+		if senderName == "" {
+			senderName = senderJID
+		}
+		go c.claudeTrigger.HandleTrigger(c.ctx, chatJID, senderJID, data.Text, senderName, data.IsFromMe)
 	}
 
 	if mediaMetadata != nil {
