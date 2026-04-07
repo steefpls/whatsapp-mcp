@@ -89,6 +89,28 @@ func (m *MCPServer) registerTools() {
 		m.handleSendMessage,
 	)
 
+	// 5b. send file (image, video, audio, document)
+	m.server.AddTool(
+		mcp.NewTool("send_file",
+			mcp.WithDescription("Send a local file to a WhatsApp chat. Auto-detects media type from MIME (image, video, audio, document). Use as_document=true to force generic document delivery."),
+			mcp.WithString("chat_jid",
+				mcp.Required(),
+				mcp.Description("recipient chat JID from find_chat or list_chats"),
+			),
+			mcp.WithString("path",
+				mcp.Required(),
+				mcp.Description("absolute path to the file on disk"),
+			),
+			mcp.WithString("caption",
+				mcp.Description("optional caption (image/video/document only — ignored for audio)"),
+			),
+			mcp.WithBoolean("as_document",
+				mcp.Description("if true, send as a generic document regardless of MIME type (default: false)"),
+			),
+		),
+		m.handleSendFile,
+	)
+
 	// 6. load more messages on-demand
 	m.server.AddTool(
 		mcp.NewTool("load_more_messages",

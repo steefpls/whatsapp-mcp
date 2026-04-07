@@ -437,6 +437,35 @@ func (m *MCPServer) handleSendMessage(ctx context.Context, request mcp.CallToolR
 	return mcp.NewToolResultText(fmt.Sprintf("Message sent successfully to %s", chatJID)), nil
 }
 
+// handleSendFile handles the send_file tool request.
+func (m *MCPServer) handleSendFile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	chatJID, err := request.RequireString("chat_jid")
+	if err != nil {
+		return mcp.NewToolResultError("chat_jid parameter is required"), nil
+	}
+
+	filePath, err := request.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError("path parameter is required"), nil
+	}
+
+	caption := request.GetString("caption", "")
+	asDocument := request.GetBool("as_document", false)
+
+	if !m.wa.IsLoggedIn() {
+		return mcp.NewToolResultError("WhatsApp is not connected"), nil
+	}
+
+	msgID, kind, err := m.wa.SendFile(ctx, chatJID, filePath, caption, asDocument)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to send file: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(
+		fmt.Sprintf("Sent %s to %s (message ID: %s)", kind, chatJID, msgID),
+	), nil
+}
+
 // handleLoadMoreMessages handles the load_more_messages tool request.
 func (m *MCPServer) handleLoadMoreMessages(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// get required chat_jid

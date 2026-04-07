@@ -3,7 +3,11 @@ package whatsapp
 import (
 	"context"
 	"fmt"
+	"mime"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"whatsapp-mcp/paths"
@@ -261,6 +265,156 @@ func (c *Client) EditMessage(ctx context.Context, chatJID string, messageID stri
 
 	_, err = c.wa.SendMessage(ctx, targetJID, editMsg)
 	return err
+}
+
+// SendFile uploads a local file and sends it to a chat as the appropriate
+// media type (image, video, audio, or document).
+//
+// If asDocument is true, the file is always sent as a generic document
+// regardless of its MIME type. Otherwise the type is auto-detected from the
+// file's content (with extension as a fallback).
+//
+// Returns the sent message ID and the WhatsApp message type used
+// ("image", "video", "audio", or "document").
+func (c *Client) SendFile(ctx context.Context, chatJID, filePath, caption string, asDocument bool) (string, string, error) {
+	targetJID, err := types.ParseJID(chatJID)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid chat JID: %w", err)
+	}
+
+	// read file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read file: %w", err)
+	}
+	if len(data) == 0 {
+		return "", "", fmt.Errorf("file is empty")
+	}
+
+	// detect MIME type: prefer extension (more specific), fall back to content sniffing
+	mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(filePath)))
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	// strip any "; charset=..." suffix
+	if idx := strings.Index(mimeType, ";"); idx != -1 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	// pick whatsmeow MediaType and message kind
+	var mediaType whatsmeow.MediaType
+	var kind string
+	switch {
+	case asDocument:
+		mediaType = whatsmeow.MediaDocument
+		kind = "document"
+	case strings.HasPrefix(mimeType, "image/"):
+		mediaType = whatsmeow.MediaImage
+		kind = "image"
+	case strings.HasPrefix(mimeType, "video/"):
+		mediaType = whatsmeow.MediaVideo
+		kind = "video"
+	case strings.HasPrefix(mimeType, "audio/"):
+		mediaType = whatsmeow.MediaAudio
+		kind = "audio"
+	default:
+		mediaType = whatsmeow.MediaDocument
+		kind = "document"
+	}
+
+	// upload to WhatsApp servers
+	uploaded, err := c.wa.Upload(ctx, data, mediaType)
+	if err != nil {
+		return "", "", fmt.Errorf("upload failed: %w", err)
+	}
+
+	// build the per-type proto message
+	msg := &waE2E.Message{}
+	switch kind {
+	case "image":
+		img := &waE2E.ImageMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(mimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+		}
+		if caption != "" {
+			img.Caption = proto.String(caption)
+		}
+		msg.ImageMessage = img
+	case "video":
+		vid := &waE2E.VideoMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(mimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+		}
+		if caption != "" {
+			vid.Caption = proto.String(caption)
+		}
+		msg.VideoMessage = vid
+	case "audio":
+		msg.AudioMessage = &waE2E.AudioMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(mimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+		}
+	default: // document
+		doc := &waE2E.DocumentMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(mimeType),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+			FileName:      proto.String(filepath.Base(filePath)),
+		}
+		if caption != "" {
+			doc.Caption = proto.String(caption)
+		}
+		msg.DocumentMessage = doc
+	}
+
+	resp, err := c.wa.SendMessage(ctx, targetJID, msg)
+	if err != nil {
+		return "", "", fmt.Errorf("send failed: %w", err)
+	}
+
+	// persist a record so the sent file shows up in chat history
+	storedText := caption
+	if storedText == "" {
+		storedText = fmt.Sprintf("[%s] %s", kind, filepath.Base(filePath))
+	}
+	if err := c.store.SaveMessage(storage.Message{
+		ID:          resp.ID,
+		ChatJID:     chatJID,
+		SenderJID:   resp.Sender.String(),
+		Text:        storedText,
+		Timestamp:   resp.Timestamp,
+		IsFromMe:    true,
+		MessageType: kind,
+	}); err != nil {
+		c.log.Warnf("SendFile: failed to persist sent message %s: %v", resp.ID, err)
+	}
+
+	c.log.Infof("Sent %s (%s, %d bytes) to %s as message %s",
+		kind, mimeType, len(data), chatJID, resp.ID)
+
+	return resp.ID, kind, nil
 }
 
 // RequestHistorySync requests additional message history from WhatsApp.

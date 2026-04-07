@@ -341,27 +341,34 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 		if isResume {
 			t.log.Printf("[CLAUDE] Retrying with fresh session for %s", chatJID)
 			t.sessionMgr.ClearSession(chatJID)
-
 			sessionID = NewSessionID()
 			prompt = t.buildPrompt(chatJID, messages, text, senderName)
+			isResume = false
 			output, err = t.execClaude(ctx, prompt, sessionID, false)
+		}
+
+		// if still failing, last-resort retry without session flags after a delay
+		if err != nil {
+			t.log.Printf("[CLAUDE] Retrying without session for %s (delay 2s)", chatJID)
+			time.Sleep(2 * time.Second)
+			sessionID = ""
+			output, err = t.execClaude(ctx, prompt, "", false)
 			if err != nil {
-				t.log.Printf("[CLAUDE] Fresh session also failed for %s: %v", chatJID, err)
+				t.log.Printf("[CLAUDE] All retries exhausted for %s: %v", chatJID, err)
 				t.trySendError(ctx, chatJID, ackID, ackErr)
 				return
 			}
-		} else {
-			t.trySendError(ctx, chatJID, ackID, ackErr)
-			return
 		}
 	}
 
-	// update session state on success
-	t.sessionMgr.SetSession(chatJID, &ChatSession{
-		SessionID:     sessionID,
-		NewestMsgTime: messages[0].Timestamp, // newest message in the full batch
-		LastUsed:      time.Now(),
-	})
+	// update session state on success (only if we used a session ID)
+	if sessionID != "" {
+		t.sessionMgr.SetSession(chatJID, &ChatSession{
+			SessionID:     sessionID,
+			NewestMsgTime: messages[0].Timestamp, // newest message in the full batch
+			LastUsed:      time.Now(),
+		})
+	}
 
 	// edit the thinking message with the actual response
 	output = strings.TrimSpace(output)
@@ -417,6 +424,8 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
 	b.WriteString("You may use other WhatsApp tools (search_messages, get_chat_messages, find_chat, etc.) if the user's request requires looking up information.\n")
+	b.WriteString("\nMEDIA ATTACHMENTS: When a message above shows a `📎 attached: ...` line with a `whatsapp://media/<id>` URI, that URI is a real MCP resource on the `whatsapp` server. To actually see/read the attached file (image, video, audio, PDF, code file, etc.), call the MCP resource-read tool on that exact URI — do NOT guess at the file's contents. Examples of when to read it: the user asks \"what is this\", \"can you see this\", \"summarize/analyze/optimize this <file>\", or otherwise refers to something they just sent. For images and short documents, read them by default if they look relevant to the request. If the line says `download pending`, `failed`, `expired`, or `skipped` instead of showing a URI, the file is NOT readable — tell the user briefly and continue with whatever you can answer from the text alone.\n")
+	b.WriteString("SENDING FILES BACK: If the user asks you to produce or return a file (e.g., an edited script, a generated image you have on disk, a converted document), use the `send_file` MCP tool with the chat_jid above. It accepts an absolute `path` and an optional `caption`. Do not paste large file contents into the chat reply.\n")
 
 	return b.String()
 }
@@ -436,6 +445,8 @@ func (t *Trigger) buildResumePrompt(chatJID string, messages []storage.MessageWi
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly.\n")
 	b.WriteString("You may use other WhatsApp tools if needed.\n")
+	b.WriteString("\nMEDIA ATTACHMENTS: A `📎 attached: ...` line with a `whatsapp://media/<id>` URI is a real MCP resource on the `whatsapp` server. Call the MCP resource-read tool on it to actually view/read the file when the user is asking about it. If it shows `download pending/failed/expired/skipped` instead of a URI, the file is NOT readable — say so briefly.\n")
+	b.WriteString("SENDING FILES BACK: To return a file, use the `send_file` MCP tool with the chat_jid above (path + optional caption). Don't paste large file contents into chat.\n")
 
 	return b.String()
 }
@@ -462,6 +473,25 @@ func (t *Trigger) writeMessages(b *strings.Builder, messages []storage.MessageWi
 			msg.Timestamp.Format("2006-01-02 15:04:05"),
 			sender,
 			msg.Text)
+
+		// surface media attachments so Claude can see (and read) them
+		if meta := msg.MediaMetadata; meta != nil {
+			fmt.Fprintf(b, "    📎 attached: %s (%s)", meta.FileName, meta.MimeType)
+			switch meta.DownloadStatus {
+			case "downloaded":
+				fmt.Fprintf(b, " — read with MCP resource: whatsapp://media/%s\n", msg.ID)
+			case "pending":
+				b.WriteString(" — download pending, not yet readable\n")
+			case "failed":
+				b.WriteString(" — download failed, not readable\n")
+			case "expired":
+				b.WriteString(" — expired on WhatsApp servers, no longer downloadable\n")
+			case "skipped":
+				b.WriteString(" — download skipped (size/type filter), not readable\n")
+			default:
+				b.WriteString("\n")
+			}
+		}
 	}
 }
 
