@@ -12,9 +12,10 @@ const sessionMaxAge = 24 * time.Hour
 
 // ChatSession tracks a Claude CLI session for a specific chat.
 type ChatSession struct {
-	SessionID     string    // Claude CLI session UUID
-	NewestMsgTime time.Time // Timestamp of the newest message included in the last prompt
-	LastUsed      time.Time // Wall clock time of last invocation
+	SessionID       string    // Claude CLI session UUID
+	NewestMsgTime   time.Time // Timestamp of the newest message included in the last prompt
+	LastUsed        time.Time // Wall clock time of last invocation
+	LastInputTokens int       // Input-token count from the last turn (used to decide compaction)
 }
 
 // SessionManager manages per-chat Claude sessions and per-chat processing locks.
