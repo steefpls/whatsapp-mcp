@@ -26,13 +26,7 @@ func NewMCPServer(wa *whatsapp.Client, store *storage.MessageStore, mediaStore *
 	s := server.NewMCPServer(
 		"WhatsApp MCP",
 		"1.0.0",
-		server.WithInstructions(`WhatsApp integration for messaging operations.
-
-Key workflow: find_chat → get_chat_messages or send_message
-Always get chat_jid from find_chat before other operations.
-JIDs are WhatsApp identifiers (e.g., 5511999999999@s.whatsapp.net).
-
-Use prompts for common workflows or resources for detailed guides.`),
+		server.WithInstructions(`WhatsApp messaging. Workflow: find_chat → get_chat_messages or send_message. JIDs look like 5511999999999@s.whatsapp.net (DM) or 120363...@g.us (group). See whatsapp://guide for details.`),
 		server.WithToolCapabilities(true),
 		server.WithPromptCapabilities(true),
 		server.WithResourceCapabilities(true, true),

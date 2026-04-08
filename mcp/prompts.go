@@ -63,29 +63,12 @@ func (m *MCPServer) handleSearchPersonMessagesPrompt(ctx context.Context, req mc
 		contactName = "[contact name]"
 	}
 
-	promptText := `I want to find ALL messages from ` + contactName + ` across ALL my WhatsApp conversations to understand context about them.
+	promptText := `Find ALL messages from ` + contactName + ` across every chat.
 
-**CRITICAL WORKFLOW:**
+1. find_chat(search="` + contactName + `") to get their JID
+2. search_messages(from="<JID>") — omit query entirely
 
-1. First, use find_chat to get their JID:
-   - find_chat(search="` + contactName + `")
-   - This returns their unique identifier (JID)
-
-2. Then, use search_messages with ONLY the 'from' parameter (NO query parameter):
-   - search_messages(from="[the JID from step 1]")
-   - **DO NOT** include a query parameter - we want ALL their messages
-   - This searches across ALL chats (DMs, groups, everywhere)
-
-3. Show me all the messages found, organized by:
-   - Date and time
-   - Which chat they're from
-   - Message content
-
-This helps me understand:
-- What topics they discuss
-- Their communication patterns
-- Context from all our interactions
-- Recent vs historical messages`
+Group results by chat and date so I can see patterns across contexts.`
 
 	return mcp.NewGetPromptResult(
 		"Find all messages from "+contactName,
@@ -110,31 +93,17 @@ func (m *MCPServer) handleGetContextAboutPersonPrompt(ctx context.Context, req m
 		focus = "all"
 	}
 
-	focusGuidance := "all messages"
+	limitHint := ""
 	if focus == "recent" {
-		focusGuidance = "recent messages (last 50-100)"
+		limitHint = " with limit=50 for recent only"
 	}
 
-	promptText := `I want to get comprehensive context about ` + contactName + ` by analyzing their WhatsApp messages.
+	promptText := `Build context about ` + contactName + ` from their WhatsApp messages.
 
-**Workflow:**
+1. find_chat(search="` + contactName + `") to get JID
+2. search_messages(from="<JID>")` + limitHint + `
 
-1. Use find_chat to find ` + contactName + `:
-   - find_chat(search="` + contactName + `")
-   - Get their JID (WhatsApp identifier)
-
-2. Get ` + focusGuidance + `:
-   - search_messages(from="[JID from step 1]")
-   - This finds all their messages across all conversations
-
-3. Analyze and provide:
-   - **Communication patterns**: How often do they message? What times?
-   - **Main topics**: What do they usually talk about?
-   - **Sentiment/tone**: Are they formal, casual, friendly?
-   - **Recent activity**: What have they discussed lately?
-   - **Key information**: Any important details to remember about them?
-
-Please provide a comprehensive summary that helps me understand who ` + contactName + ` is and our relationship context.`
+Summarize: communication patterns, main topics, tone, key facts to remember.`
 
 	return mcp.NewGetPromptResult(
 		"Get context about "+contactName,
@@ -154,26 +123,12 @@ func (m *MCPServer) handleAnalyzeConversationPrompt(ctx context.Context, req mcp
 		contactName = "[contact name]"
 	}
 
-	promptText := `I want to analyze my recent WhatsApp conversation with ` + contactName + `.
+	promptText := `Analyze the recent WhatsApp conversation with ` + contactName + `.
 
-**Workflow:**
+1. find_chat(search="` + contactName + `") to get chat_jid
+2. get_chat_messages(chat_jid="<jid>", limit=50)
 
-1. Find the conversation:
-   - find_chat(search="` + contactName + `")
-   - This will give you the chat_jid
-
-2. Get recent messages:
-   - get_chat_messages(chat_jid="[from step 1]", limit=50)
-   - Retrieve the last 50 messages from this specific conversation
-
-3. Analyze and provide:
-   - **Main topics discussed**: What are we talking about?
-   - **Action items**: Any pending tasks or requests?
-   - **Important dates/events**: Any deadlines or meetings mentioned?
-   - **Conversation tone**: Is it professional, casual, friendly?
-   - **Key takeaways**: What are the most important points?
-
-Please provide a structured summary of our recent conversation.`
+Summarize: main topics, action items, important dates, tone, key takeaways.`
 
 	return mcp.NewGetPromptResult(
 		"Analyze conversation with "+contactName,
@@ -193,26 +148,11 @@ func (m *MCPServer) handleSearchKeywordPrompt(ctx context.Context, req mcp.GetPr
 		keyword = "[keyword]"
 	}
 
-	promptText := `I want to search for "` + keyword + `" across all my WhatsApp conversations.
+	promptText := `Search WhatsApp for "` + keyword + `".
 
-**Workflow:**
+search_messages(query="` + keyword + `")
 
-1. Use search_messages with the keyword:
-   - search_messages(query="` + keyword + `")
-   - This searches across ALL chats (DMs and groups)
-
-2. Show me the results organized by:
-   - Which chat/contact the message is from
-   - When it was sent (date and time)
-   - The message content (with the keyword highlighted in context)
-   - Relevance (most recent or most relevant first)
-
-**Tips:**
-- Use wildcards for broader search: *` + keyword + `* for case-sensitive
-- Combine with sender if needed: search_messages(query="` + keyword + `", from="[JID]")
-- Search is case-insensitive by default
-
-Please show me all instances of "` + keyword + `" in my WhatsApp messages.`
+Show results grouped by chat with timestamps. Use *` + keyword + `* for case-sensitive glob matching, or add from="<JID>" to filter by sender.`
 
 	return mcp.NewGetPromptResult(
 		"Search for '"+keyword+"' across all chats",

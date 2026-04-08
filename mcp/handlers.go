@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	"whatsapp-mcp/claude"
 	"whatsapp-mcp/storage"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -109,6 +111,27 @@ func formatDuration(seconds *int) string {
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
+// formatMediaLine returns a single compact line describing media metadata.
+// Includes the media URI when downloaded, or a status tag otherwise.
+func formatMediaLine(meta *storage.MediaMetadata, msgID string) string {
+	if meta == nil {
+		return ""
+	}
+	parts := []string{"📎", meta.FileName, formatFileSize(meta.FileSize)}
+	if dims := formatDimensions(meta.Width, meta.Height); dims != "" {
+		parts = append(parts, dims)
+	}
+	if dur := formatDuration(meta.Duration); dur != "" {
+		parts = append(parts, dur)
+	}
+	if meta.DownloadStatus == "downloaded" {
+		parts = append(parts, "→ whatsapp://media/"+msgID)
+	} else {
+		parts = append(parts, "["+meta.DownloadStatus+"]")
+	}
+	return strings.Join(parts, " ")
+}
+
 // handleListChats handles the list_chats tool request.
 func (m *MCPServer) handleListChats(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// get limit parameter with default
@@ -123,26 +146,21 @@ func (m *MCPServer) handleListChats(ctx context.Context, request mcp.CallToolReq
 		return mcp.NewToolResultError(fmt.Sprintf("failed to list chats: %v", err)), nil
 	}
 
-	// format response
+	// format response: one compact line per chat
 	var result strings.Builder
-	fmt.Fprintf(&result, "Found %d chats:\n\n", len(chats))
-
 	for i, chat := range chats {
 		chatType := "DM"
 		if chat.IsGroup {
 			chatType = "Group"
 		}
-
-		jid := chat.JID
-		displayName := getDisplayName(chat)
-		fmt.Fprintf(&result, "%d. [%s] %s\n", i+1, chatType, displayName)
-		fmt.Fprintf(&result, "   JID: %s\n", jid)
-		if chat.ContactName != "" && chat.PushName != "" && chat.ContactName != chat.PushName {
-			fmt.Fprintf(&result, "   (Contact: %s, Push: %s)\n", chat.ContactName, chat.PushName)
-		}
-		fmt.Fprintf(&result, "   Last message: %s\n", m.formatDateTime(chat.LastMessageTime))
+		fmt.Fprintf(&result, "%d. %s | %s | %s | %s",
+			i+1,
+			chatType,
+			getDisplayName(chat),
+			chat.JID,
+			m.formatDateTime(chat.LastMessageTime))
 		if chat.UnreadCount > 0 {
-			fmt.Fprintf(&result, "   Unread: %d\n", chat.UnreadCount)
+			fmt.Fprintf(&result, " | unread:%d", chat.UnreadCount)
 		}
 		result.WriteString("\n")
 	}
@@ -211,66 +229,31 @@ func (m *MCPServer) handleGetChatMessages(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("failed to get messages: %v", err)), nil
 	}
 
-	// format response
+	// format response: oldest first, compact lines
 	var result strings.Builder
-	fmt.Fprintf(&result, "Retrieved %d messages from chat %s", len(messages), chatJID)
-
-	if senderJID != "" {
-		fmt.Fprintf(&result, " (filtered by sender: %s)", senderJID)
-	}
-	if beforeTime != nil {
-		fmt.Fprintf(&result, " (before: %s)", m.formatDateTime(*beforeTime))
-	}
-	if afterTime != nil {
-		fmt.Fprintf(&result, " (after: %s)", m.formatDateTime(*afterTime))
-	}
-	result.WriteString(":\n\n")
-
-	for i := len(messages) - 1; i >= 0; i-- { // reverse to show oldest first
+	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
+		// skip @claude trigger ack ghosts
+		if msg.IsFromMe && claude.IsThinkingMessage(msg.Text) {
+			continue
+		}
 		sender := getSenderDisplayName(msg)
-
 		direction := "←"
 		if msg.IsFromMe {
 			direction = "→"
 			sender = "You"
 		}
 
-		fmt.Fprintf(&result, "[%s] %s %s: %s\n",
-			m.formatTime(msg.Timestamp),
-			direction,
-			sender,
-			msg.Text)
+		text := msg.Text
+		if text == "" && msg.MediaMetadata != nil {
+			// media-only message: put media on the main line
+			text = formatMediaLine(msg.MediaMetadata, msg.ID)
+		}
+		fmt.Fprintf(&result, "%s %s %s: %s\n", m.formatTime(msg.Timestamp), direction, sender, text)
 
-		// show media metadata if present
-		if msg.MediaMetadata != nil {
-			meta := msg.MediaMetadata
-			fmt.Fprintf(&result, "   📎 %s (%s, %s)",
-				meta.FileName, meta.MimeType, formatFileSize(meta.FileSize))
-
-			// add dimensions if available
-			if dims := formatDimensions(meta.Width, meta.Height); dims != "" {
-				fmt.Fprintf(&result, ", %s", dims)
-			}
-
-			// add duration if available
-			if dur := formatDuration(meta.Duration); dur != "" {
-				fmt.Fprintf(&result, ", %s", dur)
-			}
-
-			// show download status
-			switch meta.DownloadStatus {
-			case "downloaded":
-				result.WriteString(" [Downloaded]")
-				fmt.Fprintf(&result, "\n   Resource: whatsapp://media/%s", msg.ID)
-			case "pending":
-				result.WriteString(" [Not downloaded]")
-			case "failed":
-				result.WriteString(" [Download failed]")
-			case "expired":
-				result.WriteString(" [Expired]")
-			}
-			result.WriteString("\n")
+		// captioned media: put media on an indented line below
+		if msg.Text != "" && msg.MediaMetadata != nil {
+			fmt.Fprintf(&result, "    %s\n", formatMediaLine(msg.MediaMetadata, msg.ID))
 		}
 	}
 
@@ -305,63 +288,42 @@ func (m *MCPServer) handleSearchMessages(ctx context.Context, request mcp.CallTo
 		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
-	// format response
+	// group messages by chat to avoid repeating the chat JID per message
+	sort.SliceStable(messages, func(i, j int) bool {
+		if messages[i].ChatJID != messages[j].ChatJID {
+			return messages[i].ChatJID < messages[j].ChatJID
+		}
+		return messages[i].Timestamp.Before(messages[j].Timestamp)
+	})
+
 	var result strings.Builder
-	fmt.Fprintf(&result, "Found %d messages matching '%s'", len(messages), query)
-	if senderJID != "" {
-		fmt.Fprintf(&result, " from sender %s", senderJID)
-	}
-	if useGlob {
-		result.WriteString(" (using pattern matching)")
-	}
-	result.WriteString(":\n\n")
+	currentChat := ""
+	for _, msg := range messages {
+		// skip @claude trigger ack ghosts
+		if msg.IsFromMe && claude.IsThinkingMessage(msg.Text) {
+			continue
+		}
+		if msg.ChatJID != currentChat {
+			if currentChat != "" {
+				result.WriteString("\n")
+			}
+			fmt.Fprintf(&result, "[%s]\n", msg.ChatJID)
+			currentChat = msg.ChatJID
+		}
 
-	for i, msg := range messages {
 		sender := getSenderDisplayName(msg)
-
 		if msg.IsFromMe {
 			sender = "You"
 		}
 
-		fmt.Fprintf(&result, "%d. [%s] %s in chat %s:\n",
-			i+1,
-			m.formatDateTime(msg.Timestamp),
-			sender,
-			msg.ChatJID)
-		fmt.Fprintf(&result, "   %s\n", msg.Text)
-
-		// show media metadata if present
-		if msg.MediaMetadata != nil {
-			meta := msg.MediaMetadata
-			fmt.Fprintf(&result, "   📎 %s (%s, %s)",
-				meta.FileName, meta.MimeType, formatFileSize(meta.FileSize))
-
-			// add dimensions if available
-			if dims := formatDimensions(meta.Width, meta.Height); dims != "" {
-				fmt.Fprintf(&result, ", %s", dims)
-			}
-
-			// add duration if available
-			if dur := formatDuration(meta.Duration); dur != "" {
-				fmt.Fprintf(&result, ", %s", dur)
-			}
-
-			// show download status
-			switch meta.DownloadStatus {
-			case "downloaded":
-				result.WriteString(" [Downloaded]")
-				fmt.Fprintf(&result, "\n   Resource: whatsapp://media/%s", msg.ID)
-			case "pending":
-				result.WriteString(" [Not downloaded]")
-			case "failed":
-				result.WriteString(" [Download failed]")
-			case "expired":
-				result.WriteString(" [Expired]")
-			}
-			result.WriteString("\n")
+		text := msg.Text
+		if text == "" && msg.MediaMetadata != nil {
+			text = formatMediaLine(msg.MediaMetadata, msg.ID)
 		}
-
-		result.WriteString("\n")
+		fmt.Fprintf(&result, "  %s %s: %s\n", m.formatDateTime(msg.Timestamp), sender, text)
+		if msg.Text != "" && msg.MediaMetadata != nil {
+			fmt.Fprintf(&result, "      %s\n", formatMediaLine(msg.MediaMetadata, msg.ID))
+		}
 	}
 
 	return mcp.NewToolResultText(result.String()), nil
@@ -384,27 +346,15 @@ func (m *MCPServer) handleFindChat(ctx context.Context, request mcp.CallToolRequ
 		return mcp.NewToolResultError(fmt.Sprintf("failed to search chats: %v", err)), nil
 	}
 
-	// format response
+	// format response: one compact line per chat
 	var result strings.Builder
-	fmt.Fprintf(&result, "Found %d matching chats", len(chats))
-	if useGlob {
-		result.WriteString(" (using pattern matching)")
-	}
-	result.WriteString(":\n\n")
-
 	for i, chat := range chats {
 		chatType := "DM"
 		if chat.IsGroup {
 			chatType = "Group"
 		}
-
-		displayName := getDisplayName(chat)
-		fmt.Fprintf(&result, "%d. [%s] %s\n", i+1, chatType, displayName)
-		fmt.Fprintf(&result, "   JID: %s\n", chat.JID)
-		if chat.ContactName != "" && chat.PushName != "" && chat.ContactName != chat.PushName {
-			fmt.Fprintf(&result, "   (Contact: %s, Push: %s)\n", chat.ContactName, chat.PushName)
-		}
-		result.WriteString("\n")
+		fmt.Fprintf(&result, "%d. %s | %s | %s\n",
+			i+1, chatType, getDisplayName(chat), chat.JID)
 	}
 
 	return mcp.NewToolResultText(result.String()), nil
@@ -501,57 +451,31 @@ func (m *MCPServer) handleLoadMoreMessages(ctx context.Context, request mcp.Call
 	var result strings.Builder
 
 	if waitForSync {
-		fmt.Fprintf(&result, "Loaded %d additional messages from chat %s:\n\n", len(messages), chatJID)
-
-		// format messages (oldest first, like get_chat_messages)
+		fmt.Fprintf(&result, "Loaded %d messages:\n", len(messages))
 		for i := len(messages) - 1; i >= 0; i-- {
 			msg := messages[i]
+			// skip @claude trigger ack ghosts
+			if msg.IsFromMe && claude.IsThinkingMessage(msg.Text) {
+				continue
+			}
 			sender := getSenderDisplayName(msg)
-
 			direction := "←"
 			if msg.IsFromMe {
 				direction = "→"
 				sender = "You"
 			}
 
-			fmt.Fprintf(&result, "[%s] %s %s: %s\n",
-				m.formatTime(msg.Timestamp),
-				direction,
-				sender,
-				msg.Text)
-
-			// show media metadata if present
-			if msg.MediaMetadata != nil {
-				meta := msg.MediaMetadata
-				fmt.Fprintf(&result, "   📎 %s (%s, %s)",
-					meta.FileName, meta.MimeType, formatFileSize(meta.FileSize))
-
-				// add dimensions if available
-				if dims := formatDimensions(meta.Width, meta.Height); dims != "" {
-					fmt.Fprintf(&result, ", %s", dims)
-				}
-
-				// add duration if available
-				if dur := formatDuration(meta.Duration); dur != "" {
-					fmt.Fprintf(&result, ", %s", dur)
-				}
-
-				// show download status
-				switch meta.DownloadStatus {
-				case "downloaded":
-					result.WriteString(" [Downloaded]")
-				case "pending":
-					result.WriteString(" [Not downloaded]")
-				case "failed":
-					result.WriteString(" [Download failed]")
-				case "expired":
-					result.WriteString(" [Expired]")
-				}
-				result.WriteString("\n")
+			text := msg.Text
+			if text == "" && msg.MediaMetadata != nil {
+				text = formatMediaLine(msg.MediaMetadata, msg.ID)
+			}
+			fmt.Fprintf(&result, "%s %s %s: %s\n", m.formatTime(msg.Timestamp), direction, sender, text)
+			if msg.Text != "" && msg.MediaMetadata != nil {
+				fmt.Fprintf(&result, "    %s\n", formatMediaLine(msg.MediaMetadata, msg.ID))
 			}
 		}
 	} else {
-		fmt.Fprintf(&result, "History sync request sent for chat %s (%d messages). Messages will load in the background. Use get_chat_messages to see them once loaded.", chatJID, count)
+		fmt.Fprintf(&result, "History sync requested (%d messages). Use get_chat_messages once loaded.", count)
 	}
 
 	return mcp.NewToolResultText(result.String()), nil

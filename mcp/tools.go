@@ -9,7 +9,7 @@ func (m *MCPServer) registerTools() {
 	// 1. list all chats
 	m.server.AddTool(
 		mcp.NewTool("list_chats",
-			mcp.WithDescription("List WhatsApp conversations ordered by most recent activity. Returns chat details including JID, name, last message timestamp, and unread count."),
+			mcp.WithDescription("List WhatsApp conversations ordered by most recent activity."),
 			mcp.WithNumber("limit",
 				mcp.Description("maximum number of chats to return (default: 50, max: 100)"),
 			),
@@ -20,7 +20,7 @@ func (m *MCPServer) registerTools() {
 	// 2. get messages from specific chat
 	m.server.AddTool(
 		mcp.NewTool("get_chat_messages",
-			mcp.WithDescription("Retrieve message history from a specific WhatsApp chat. Supports pagination via timestamps or offset, and can filter by sender."),
+			mcp.WithDescription("Retrieve messages from one chat. Supports filtering by sender and timestamp pagination."),
 			mcp.WithString("chat_jid",
 				mcp.Required(),
 				mcp.Description("chat JID (WhatsApp identifier) from find_chat or list_chats"),
@@ -47,7 +47,7 @@ func (m *MCPServer) registerTools() {
 	// 3. search messages by text
 	m.server.AddTool(
 		mcp.NewTool("search_messages",
-			mcp.WithDescription("Search for messages across all WhatsApp chats by text content or sender. Supports pattern matching with wildcards (*, ?, [abc])."),
+			mcp.WithDescription("Search messages across all chats by text or sender. Supports glob wildcards (*, ?, [abc])."),
 			mcp.WithString("query",
 				mcp.Description("text pattern to search for (optional: can be omitted when using only 'from' parameter)"),
 			),
@@ -64,7 +64,7 @@ func (m *MCPServer) registerTools() {
 	// 4. find chat by name or JID
 	m.server.AddTool(
 		mcp.NewTool("find_chat",
-			mcp.WithDescription("Find WhatsApp chats by searching names or JIDs. Supports pattern matching with wildcards. Returns matching chats with their JIDs."),
+			mcp.WithDescription("Find chats by name or JID. Supports glob wildcards."),
 			mcp.WithString("search",
 				mcp.Required(),
 				mcp.Description("search pattern (supports wildcards: *, ?, [abc])"),
@@ -92,7 +92,7 @@ func (m *MCPServer) registerTools() {
 	// 5b. send file (image, video, audio, document)
 	m.server.AddTool(
 		mcp.NewTool("send_file",
-			mcp.WithDescription("Send a local file to a WhatsApp chat. Auto-detects media type from MIME (image, video, audio, document). Use as_document=true to force generic document delivery."),
+			mcp.WithDescription("Send a local file to a chat. Auto-detects media type; use as_document=true to force generic document."),
 			mcp.WithString("chat_jid",
 				mcp.Required(),
 				mcp.Description("recipient chat JID from find_chat or list_chats"),
@@ -114,7 +114,7 @@ func (m *MCPServer) registerTools() {
 	// 6. load more messages on-demand
 	m.server.AddTool(
 		mcp.NewTool("load_more_messages",
-			mcp.WithDescription("Fetch additional message history from WhatsApp servers for a specific chat. Use when you need older messages not yet in the database."),
+			mcp.WithDescription("Fetch older messages from WhatsApp servers when not yet in the local database."),
 			mcp.WithString("chat_jid",
 				mcp.Required(),
 				mcp.Description("chat JID to fetch history for"),
@@ -132,7 +132,7 @@ func (m *MCPServer) registerTools() {
 	// 7. get my info
 	m.server.AddTool(
 		mcp.NewTool("get_my_info",
-			mcp.WithDescription("Get your own WhatsApp profile information including JID, display name, status/bio, and profile picture URL."),
+			mcp.WithDescription("Get your own WhatsApp profile (JID, name, status, picture URL)."),
 		),
 		m.handleGetMyInfo,
 	)
@@ -140,7 +140,7 @@ func (m *MCPServer) registerTools() {
 	// 8. add trusted user for @claude trigger
 	m.server.AddTool(
 		mcp.NewTool("add_trusted_user",
-			mcp.WithDescription("Add a WhatsApp user to the trusted users list, allowing them to trigger @claude in messages."),
+			mcp.WithDescription("Allow a user to trigger @claude in messages."),
 			mcp.WithString("jid",
 				mcp.Required(),
 				mcp.Description("WhatsApp JID of the user to trust (e.g., 6591234567@s.whatsapp.net)"),
@@ -152,7 +152,7 @@ func (m *MCPServer) registerTools() {
 	// 9. remove trusted user
 	m.server.AddTool(
 		mcp.NewTool("remove_trusted_user",
-			mcp.WithDescription("Remove a WhatsApp user from the trusted users list, revoking their ability to trigger @claude."),
+			mcp.WithDescription("Revoke a user's ability to trigger @claude."),
 			mcp.WithString("jid",
 				mcp.Required(),
 				mcp.Description("WhatsApp JID of the user to remove from trusted list"),
@@ -164,7 +164,7 @@ func (m *MCPServer) registerTools() {
 	// 10. list trusted users
 	m.server.AddTool(
 		mcp.NewTool("list_trusted_users",
-			mcp.WithDescription("List all WhatsApp users who are authorized to trigger @claude in messages."),
+			mcp.WithDescription("List users authorized to trigger @claude."),
 		),
 		m.handleListTrustedUsers,
 	)

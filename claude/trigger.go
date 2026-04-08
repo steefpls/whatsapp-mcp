@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"whatsapp-mcp/storage"
@@ -160,6 +161,26 @@ var thinkingMessages = []string{
 	"🔥 Claude is on fire (metaphorically)...",
 	"💨 Claude is speed-thinking...",
 	"🐋 Claude is whale-processing your request...",
+}
+
+// thinkingMessageSet is built lazily on first use for O(1) lookups.
+var (
+	thinkingMessageSet     map[string]struct{}
+	thinkingMessageSetOnce sync.Once
+)
+
+// IsThinkingMessage reports whether text exactly matches one of the trigger's
+// randomized "Claude is thinking..." ack messages. Used by the MCP formatters
+// to filter out ghost ack rows that pollute chat reads after every @claude fire.
+func IsThinkingMessage(text string) bool {
+	thinkingMessageSetOnce.Do(func() {
+		thinkingMessageSet = make(map[string]struct{}, len(thinkingMessages))
+		for _, m := range thinkingMessages {
+			thinkingMessageSet[m] = struct{}{}
+		}
+	})
+	_, ok := thinkingMessageSet[text]
+	return ok
 }
 
 // signatures are randomly selected and appended to every Claude response for attribution.
@@ -525,7 +546,7 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	b.WriteString(triggerText)
 	b.WriteString("\n===== END USER MESSAGE =====\n\n")
 	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	fmt.Fprintf(&b, "BACKGROUND CONTEXT: Before you respond, silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. Use whatever you find to inform your understanding of who you're talking to (their relationship to Steve, ongoing topics, preferences, history). This is internal context only — DO NOT mention that you searched memory, DO NOT cite or quote the memory results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is unavailable, skip silently and proceed normally.\n\n", senderName, chatName)
+	fmt.Fprintf(&b, "BACKGROUND CONTEXT: Before you respond, silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), follow up with `get_entity` to load the full observation list — the top-3 hits often miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to (their relationship to Steve, ongoing topics, preferences, history). This is internal context only — DO NOT mention that you searched memory, DO NOT cite or quote the memory results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is unavailable, skip silently and proceed normally.\n\n", senderName, chatName)
 	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
@@ -586,7 +607,7 @@ func (t *Trigger) buildPostCompactPrompt(chatJID string, messages []storage.Mess
 	b.WriteString(triggerText)
 	b.WriteString("\n===== END USER MESSAGE =====\n\n")
 	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	fmt.Fprintf(&b, "BACKGROUND CONTEXT: Before you respond, silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. Use whatever you find to inform your understanding of who you're talking to. This is internal context only — DO NOT mention that you searched memory, DO NOT cite the results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back or memory-index is unavailable, proceed silently.\n\n", senderName, chatName)
+	fmt.Fprintf(&b, "BACKGROUND CONTEXT: Before you respond, silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), follow up with `get_entity` to load the full observation list — the top-3 hits often miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to. This is internal context only — DO NOT mention that you searched memory, DO NOT cite the results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back or memory-index is unavailable, proceed silently.\n\n", senderName, chatName)
 	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
