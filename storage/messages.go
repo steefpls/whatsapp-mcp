@@ -62,6 +62,19 @@ func (s *MessageStore) SaveMessage(msg Message) error {
 	return nil
 }
 
+// UpdateMessageText updates only the text column of an existing message,
+// preserving sender, timestamp, and all other metadata. Used by the @claude
+// trigger to patch the local DB after a successful WhatsApp edit, since
+// outbound edits don't propagate back through the normal message handler.
+// Returns nil even if no row matched (caller's choice to log).
+func (s *MessageStore) UpdateMessageText(id string, newText string) error {
+	_, err := s.db.Exec(`UPDATE messages SET text = ? WHERE id = ?`, newText, id)
+	if err != nil {
+		return fmt.Errorf("failed to update message text: %w", err)
+	}
+	return nil
+}
+
 // SaveBulk saves multiple messages in a single transaction.
 // This is optimized for history sync operations.
 func (s *MessageStore) SaveBulk(messages []Message) error {

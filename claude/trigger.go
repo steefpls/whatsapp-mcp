@@ -251,6 +251,7 @@ type Trigger struct {
 	editMsg    func(ctx context.Context, chatJID string, messageID string, newText string) error
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
 	isTrusted  func(jid string) (bool, error)
+	store      *storage.MessageStore
 	sessionMgr *SessionManager
 	log        *log.Logger
 }
@@ -264,6 +265,7 @@ func NewTrigger(
 	editMsg func(ctx context.Context, chatJID string, messageID string, newText string) error,
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error),
 	isTrusted func(jid string) (bool, error),
+	store *storage.MessageStore,
 	sessionMgr *SessionManager,
 ) *Trigger {
 	return &Trigger{
@@ -274,6 +276,7 @@ func NewTrigger(
 		editMsg:    editMsg,
 		getHistory: getHistory,
 		isTrusted:  isTrusted,
+		store:      store,
 		sessionMgr: sessionMgr,
 		log:        log.Default(),
 	}
@@ -451,6 +454,9 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 			if err := t.editMsg(ctx, chatJID, ackID, response); err != nil {
 				t.log.Printf("[CLAUDE] Failed to edit ack message %s, sending new: %v", ackID, err)
 				t.sendMsg(ctx, chatJID, response)
+			} else if uerr := t.store.UpdateMessageText(ackID, response); uerr != nil {
+				// patch local DB so MCP reads see the real response, not the ghost ack
+				t.log.Printf("[CLAUDE] Failed to update local DB for ack %s: %v", ackID, uerr)
 			}
 		} else {
 			t.sendMsg(ctx, chatJID, response)
@@ -499,6 +505,8 @@ func (t *Trigger) trySendError(ctx context.Context, chatJID, ackID string, ackEr
 	if ackErr == nil && ackID != "" {
 		if err := t.editMsg(ctx, chatJID, ackID, errMsg); err != nil {
 			t.sendMsg(ctx, chatJID, errMsg)
+		} else if uerr := t.store.UpdateMessageText(ackID, errMsg); uerr != nil {
+			t.log.Printf("[CLAUDE] Failed to update local DB for ack %s: %v", ackID, uerr)
 		}
 	} else {
 		t.sendMsg(ctx, chatJID, errMsg)

@@ -180,7 +180,7 @@ func main() {
 	claudeConfig := claude.LoadConfig()
 	if claudeConfig.Enabled {
 		sessionMgr := claude.NewSessionManager()
-		trigger := claude.NewTrigger(claudeConfig, waClient.SendTextMessage, waClient.SendTextMessageWithID, waClient.RevokeMessage, waClient.EditMessage, store.GetChatMessagesWithNames, trustedUserStore.IsTrusted, sessionMgr)
+		trigger := claude.NewTrigger(claudeConfig, waClient.SendTextMessage, waClient.SendTextMessageWithID, waClient.RevokeMessage, waClient.EditMessage, store.GetChatMessagesWithNames, trustedUserStore.IsTrusted, store, sessionMgr)
 		waClient.SetClaudeTrigger(trigger)
 		log.Println("@claude trigger enabled")
 	} else {
