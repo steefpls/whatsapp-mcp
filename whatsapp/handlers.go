@@ -81,6 +81,11 @@ type messageData struct {
 	MessageType string
 	PushName    string // sender's WhatsApp display name from message
 	IsGroup     bool
+
+	// Quote-reply parent fields. Empty when this message is not a reply.
+	QuotedMessageID string
+	QuotedSenderJID string // canonical JID
+	QuotedText      string
 }
 
 // getGroupInfoCached fetches group info with database caching to avoid excessive API calls.
@@ -193,13 +198,16 @@ func (c *Client) processMessageData(ctx context.Context, data messageData) error
 
 	// save message
 	msg := storage.Message{
-		ID:          data.MessageID,
-		ChatJID:     chatJID,
-		SenderJID:   senderJID,
-		Text:        data.Text,
-		Timestamp:   data.Timestamp,
-		IsFromMe:    data.IsFromMe,
-		MessageType: data.MessageType,
+		ID:              data.MessageID,
+		ChatJID:         chatJID,
+		SenderJID:       senderJID,
+		Text:            data.Text,
+		Timestamp:       data.Timestamp,
+		IsFromMe:        data.IsFromMe,
+		MessageType:     data.MessageType,
+		QuotedMessageID: data.QuotedMessageID,
+		QuotedSenderJID: data.QuotedSenderJID,
+		QuotedText:      data.QuotedText,
 	}
 
 	if err := c.store.SaveMessage(msg); err != nil {
@@ -270,16 +278,21 @@ func (c *Client) parseHistoryMessage(chatJID types.JID, msg *waWeb.WebMessageInf
 			}
 		}
 
+		quotedID, quotedSender, quotedText := extractQuotedInfo(msg.GetMessage(), c.normalizeJID)
+
 		return &messageData{
-			MessageID:   info.ID,
-			ChatJID:     chatJID,
-			SenderJID:   info.Sender,
-			Text:        text,
-			Timestamp:   info.Timestamp,
-			IsFromMe:    info.IsFromMe,
-			MessageType: c.getMessageType(msg.GetMessage()),
-			PushName:    pushName,
-			IsGroup:     chatJID.Server == "g.us",
+			MessageID:       info.ID,
+			ChatJID:         chatJID,
+			SenderJID:       info.Sender,
+			Text:            text,
+			Timestamp:       info.Timestamp,
+			IsFromMe:        info.IsFromMe,
+			MessageType:     c.getMessageType(msg.GetMessage()),
+			PushName:        pushName,
+			IsGroup:         chatJID.Server == "g.us",
+			QuotedMessageID: quotedID,
+			QuotedSenderJID: quotedSender,
+			QuotedText:      quotedText,
 		}
 	}
 
@@ -325,16 +338,21 @@ func (c *Client) parseHistoryMessage(chatJID types.JID, msg *waWeb.WebMessageInf
 		text = "[Media or unknown]"
 	}
 
+	quotedID, quotedSender, quotedText := extractQuotedInfo(msg.GetMessage(), c.normalizeJID)
+
 	return &messageData{
-		MessageID:   messageID,
-		ChatJID:     chatJID,
-		SenderJID:   senderJID,
-		Text:        text,
-		Timestamp:   timestamp,
-		IsFromMe:    fromMe,
-		MessageType: c.getMessageType(msg.GetMessage()),
-		PushName:    pushName,
-		IsGroup:     chatJID.Server == "g.us",
+		MessageID:       messageID,
+		ChatJID:         chatJID,
+		SenderJID:       senderJID,
+		Text:            text,
+		Timestamp:       timestamp,
+		IsFromMe:        fromMe,
+		MessageType:     c.getMessageType(msg.GetMessage()),
+		PushName:        pushName,
+		IsGroup:         chatJID.Server == "g.us",
+		QuotedMessageID: quotedID,
+		QuotedSenderJID: quotedSender,
+		QuotedText:      quotedText,
 	}
 }
 
@@ -386,16 +404,21 @@ func (c *Client) handleMessage(evt *events.Message) {
 		}
 	}
 
+	quotedID, quotedSender, quotedText := extractQuotedInfo(evt.Message, c.normalizeJID)
+
 	data := messageData{
-		MessageID:   info.ID,
-		ChatJID:     info.Chat,
-		SenderJID:   info.Sender,
-		Text:        text,
-		Timestamp:   info.Timestamp,
-		IsFromMe:    info.IsFromMe,
-		MessageType: c.getMessageType(evt.Message),
-		PushName:    info.PushName,
-		IsGroup:     info.Chat.Server == "g.us",
+		MessageID:       info.ID,
+		ChatJID:         info.Chat,
+		SenderJID:       info.Sender,
+		Text:            text,
+		Timestamp:       info.Timestamp,
+		IsFromMe:        info.IsFromMe,
+		MessageType:     c.getMessageType(evt.Message),
+		PushName:        info.PushName,
+		IsGroup:         info.Chat.Server == "g.us",
+		QuotedMessageID: quotedID,
+		QuotedSenderJID: quotedSender,
+		QuotedText:      quotedText,
 	}
 
 	// skip saving poll-related messages
@@ -477,13 +500,16 @@ func (c *Client) handleMessage(evt *events.Message) {
 
 		msgWithNames := storage.MessageWithNames{
 			Message: storage.Message{
-				ID:          data.MessageID,
-				ChatJID:     c.normalizeJID(data.ChatJID),
-				SenderJID:   c.normalizeJID(data.SenderJID),
-				Text:        data.Text,
-				Timestamp:   data.Timestamp,
-				IsFromMe:    data.IsFromMe,
-				MessageType: data.MessageType,
+				ID:              data.MessageID,
+				ChatJID:         c.normalizeJID(data.ChatJID),
+				SenderJID:       c.normalizeJID(data.SenderJID),
+				Text:            data.Text,
+				Timestamp:       data.Timestamp,
+				IsFromMe:        data.IsFromMe,
+				MessageType:     data.MessageType,
+				QuotedMessageID: data.QuotedMessageID,
+				QuotedSenderJID: data.QuotedSenderJID,
+				QuotedText:      data.QuotedText,
 			},
 			ChatName:          chatName,
 			SenderPushName:    senderPushName,
@@ -663,13 +689,16 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 
 			// add message to batch
 			allMessages = append(allMessages, storage.Message{
-				ID:          msgData.MessageID,
-				ChatJID:     normalizedChatJID,
-				SenderJID:   normalizedSenderJID,
-				Text:        msgData.Text,
-				Timestamp:   msgData.Timestamp,
-				IsFromMe:    msgData.IsFromMe,
-				MessageType: msgData.MessageType,
+				ID:              msgData.MessageID,
+				ChatJID:         normalizedChatJID,
+				SenderJID:       normalizedSenderJID,
+				Text:            msgData.Text,
+				Timestamp:       msgData.Timestamp,
+				IsFromMe:        msgData.IsFromMe,
+				MessageType:     msgData.MessageType,
+				QuotedMessageID: msgData.QuotedMessageID,
+				QuotedSenderJID: msgData.QuotedSenderJID,
+				QuotedText:      msgData.QuotedText,
 			})
 		}
 	}
@@ -865,6 +894,106 @@ func extractText(msg *waE2E.Message) string {
 	}
 
 	return ""
+}
+
+// extractContextInfo returns the ContextInfo block from whichever subtype carries it.
+// WhatsApp attaches quote-reply metadata to ContextInfo on every message kind that
+// can be a reply (text, image, video, audio, document, sticker, contact, location, ...).
+func extractContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	if msg == nil {
+		return nil
+	}
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		if ci := ext.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if img := msg.GetImageMessage(); img != nil {
+		if ci := img.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		if ci := vid.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if aud := msg.GetAudioMessage(); aud != nil {
+		if ci := aud.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		if ci := doc.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if stk := msg.GetStickerMessage(); stk != nil {
+		if ci := stk.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if loc := msg.GetLocationMessage(); loc != nil {
+		if ci := loc.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	if con := msg.GetContactMessage(); con != nil {
+		if ci := con.GetContextInfo(); ci != nil {
+			return ci
+		}
+	}
+	return nil
+}
+
+// extractQuotedInfo pulls quote-reply parent fields from a WhatsApp message.
+// Returns (parentID, parentSenderJID, parentText) — all empty when the message
+// isn't a reply. parentSenderJID is canonicalized via the supplied normalizer.
+func extractQuotedInfo(msg *waE2E.Message, normalize func(types.JID) string) (string, string, string) {
+	ci := extractContextInfo(msg)
+	if ci == nil {
+		return "", "", ""
+	}
+	stanzaID := ci.GetStanzaID()
+	if stanzaID == "" {
+		return "", "", ""
+	}
+
+	// Participant is the parent sender's JID (set on group quotes; in DMs whatsmeow
+	// often leaves it empty and the parent is implicitly the other side of the chat).
+	var senderJID string
+	if p := ci.GetParticipant(); p != "" {
+		if parsed, err := types.ParseJID(p); err == nil {
+			senderJID = normalize(parsed)
+		}
+	}
+
+	// QuotedMessage carries the parent's body — recurse via extractText so we
+	// pick up text, captions, etc. uniformly.
+	parentText := extractText(ci.GetQuotedMessage())
+	if parentText == "" {
+		// surface a placeholder so the chat-Claude can at least see "this was a media reply"
+		if qm := ci.GetQuotedMessage(); qm != nil {
+			switch {
+			case qm.GetImageMessage() != nil:
+				parentText = "[Image]"
+			case qm.GetVideoMessage() != nil:
+				parentText = "[Video]"
+			case qm.GetAudioMessage() != nil:
+				parentText = "[Audio]"
+			case qm.GetDocumentMessage() != nil:
+				parentText = "[Document]"
+			case qm.GetStickerMessage() != nil:
+				parentText = "[Sticker]"
+			case qm.GetLocationMessage() != nil:
+				parentText = "[Location]"
+			case qm.GetContactMessage() != nil:
+				parentText = "[Contact]"
+			}
+		}
+	}
+
+	return stanzaID, senderJID, parentText
 }
 
 // getTypeFromMessage returns the high-level message type.

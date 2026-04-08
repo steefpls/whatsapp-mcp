@@ -16,6 +16,7 @@ type ChatSession struct {
 	NewestMsgTime   time.Time // Timestamp of the newest message included in the last prompt
 	LastUsed        time.Time // Wall clock time of last invocation
 	LastInputTokens int       // Input-token count from the last turn (used to decide compaction)
+	JustCompacted   bool      // True if this session was created by a compaction this turn — prevents back-to-back compaction loops
 }
 
 // SessionManager manages per-chat Claude sessions and per-chat processing locks.

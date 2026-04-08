@@ -15,6 +15,11 @@ type Message struct {
 	Timestamp   time.Time
 	IsFromMe    bool
 	MessageType string
+
+	// Quote-reply parent fields. Empty when this message is not a reply.
+	QuotedMessageID string // Parent WhatsApp message ID
+	QuotedSenderJID string // Canonical JID of the parent's sender
+	QuotedText      string // Text/caption of the parent message
 }
 
 // MessageWithNames represents a message with sender and chat names from the database view.
@@ -24,6 +29,7 @@ type MessageWithNames struct {
 	SenderContactName string         // Current saved contact name (from chats table)
 	ChatName          string         // Current chat name (for display)
 	MediaMetadata     *MediaMetadata // Associated media metadata (null if no media)
+	QuotedSenderName  string         // Resolved display name of the quoted-message sender (empty if no reply)
 }
 
 // MessageStore handles message operations on the database.
@@ -40,8 +46,9 @@ func NewMessageStore(db *sql.DB) *MessageStore {
 func (s *MessageStore) SaveMessage(msg Message) error {
 	query := `
 	INSERT OR REPLACE INTO messages
-	(id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	(id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type,
+	 quoted_message_id, quoted_sender_jid, quoted_text)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.Exec(
@@ -53,6 +60,9 @@ func (s *MessageStore) SaveMessage(msg Message) error {
 		msg.Timestamp.Unix(),
 		msg.IsFromMe,
 		msg.MessageType,
+		nullableString(msg.QuotedMessageID),
+		nullableString(msg.QuotedSenderJID),
+		nullableString(msg.QuotedText),
 	)
 
 	if err != nil {
@@ -60,6 +70,15 @@ func (s *MessageStore) SaveMessage(msg Message) error {
 	}
 
 	return nil
+}
+
+// nullableString returns sql.NullString-style nil for empty strings so the
+// quoted_* columns stay NULL when a message is not a quote-reply.
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // UpdateMessageText updates only the text column of an existing message,
@@ -88,8 +107,9 @@ func (s *MessageStore) SaveBulk(messages []Message) error {
 
 	stmt, err := tx.Prepare(`
 	INSERT OR REPLACE INTO messages
-	(id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	(id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type,
+	 quoted_message_id, quoted_sender_jid, quoted_text)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -106,6 +126,9 @@ func (s *MessageStore) SaveBulk(messages []Message) error {
 			msg.Timestamp.Unix(),
 			msg.IsFromMe,
 			msg.MessageType,
+			nullableString(msg.QuotedMessageID),
+			nullableString(msg.QuotedSenderJID),
+			nullableString(msg.QuotedText),
 		)
 
 		if err != nil {
@@ -120,7 +143,8 @@ func (s *MessageStore) SaveBulk(messages []Message) error {
 // SearchMessages searches messages by text content.
 func (s *MessageStore) SearchMessages(q string, limit int) ([]Message, error) {
 	query := `
-	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type
+	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type,
+	       quoted_message_id, quoted_sender_jid, quoted_text
 	FROM messages
 	WHERE text LIKE ?
 	ORDER BY timestamp DESC
@@ -140,7 +164,8 @@ func (s *MessageStore) SearchMessages(q string, limit int) ([]Message, error) {
 // GetChatMessages retrieves messages from a specific chat.
 func (s *MessageStore) GetChatMessages(chatJID string, limit int, offset int) ([]Message, error) {
 	query := `
-	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type
+	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type,
+	       quoted_message_id, quoted_sender_jid, quoted_text
 	FROM messages
 	WHERE chat_jid = ?
 	ORDER BY timestamp DESC
@@ -160,7 +185,8 @@ func (s *MessageStore) GetChatMessages(chatJID string, limit int, offset int) ([
 // It returns nil if the message is not found.
 func (s *MessageStore) GetMessageByID(messageID string) (*Message, error) {
 	query := `
-	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type
+	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type,
+	       quoted_message_id, quoted_sender_jid, quoted_text
 	FROM messages
 	WHERE id = ?
 	`
@@ -169,6 +195,7 @@ func (s *MessageStore) GetMessageByID(messageID string) (*Message, error) {
 
 	var msg Message
 	var timestampUnix int64
+	var quotedMessageID, quotedSenderJID, quotedText sql.NullString
 
 	err := row.Scan(
 		&msg.ID,
@@ -178,6 +205,9 @@ func (s *MessageStore) GetMessageByID(messageID string) (*Message, error) {
 		&timestampUnix,
 		&msg.IsFromMe,
 		&msg.MessageType,
+		&quotedMessageID,
+		&quotedSenderJID,
+		&quotedText,
 	)
 
 	if err == sql.ErrNoRows {
@@ -189,6 +219,9 @@ func (s *MessageStore) GetMessageByID(messageID string) (*Message, error) {
 	}
 
 	msg.Timestamp = time.Unix(timestampUnix, 0)
+	msg.QuotedMessageID = quotedMessageID.String
+	msg.QuotedSenderJID = quotedSenderJID.String
+	msg.QuotedText = quotedText.String
 
 	return &msg, nil
 }
@@ -197,7 +230,8 @@ func (s *MessageStore) GetMessageByID(messageID string) (*Message, error) {
 // This is used for history sync requests.
 func (s *MessageStore) GetOldestMessage(chatJID string) (*Message, error) {
 	query := `
-	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type
+	SELECT id, chat_jid, sender_jid, text, timestamp, is_from_me, message_type,
+	       quoted_message_id, quoted_sender_jid, quoted_text
 	FROM messages
 	WHERE chat_jid = ?
 	ORDER BY timestamp ASC
@@ -208,6 +242,7 @@ func (s *MessageStore) GetOldestMessage(chatJID string) (*Message, error) {
 
 	var msg Message
 	var timestampUnix int64
+	var quotedMessageID, quotedSenderJID, quotedText sql.NullString
 
 	err := row.Scan(
 		&msg.ID,
@@ -217,6 +252,9 @@ func (s *MessageStore) GetOldestMessage(chatJID string) (*Message, error) {
 		&timestampUnix,
 		&msg.IsFromMe,
 		&msg.MessageType,
+		&quotedMessageID,
+		&quotedSenderJID,
+		&quotedText,
 	)
 
 	if err == sql.ErrNoRows {
@@ -228,6 +266,9 @@ func (s *MessageStore) GetOldestMessage(chatJID string) (*Message, error) {
 	}
 
 	msg.Timestamp = time.Unix(timestampUnix, 0)
+	msg.QuotedMessageID = quotedMessageID.String
+	msg.QuotedSenderJID = quotedSenderJID.String
+	msg.QuotedText = quotedText.String
 
 	return &msg, nil
 }
@@ -240,7 +281,8 @@ func (s *MessageStore) GetChatMessagesOlderThan(chatJID string, timestamp time.T
 	       text, timestamp, is_from_me, message_type,
 	       media_file_path, media_file_name, media_file_size, media_mime_type,
 	       media_width, media_height, media_duration, media_download_status,
-	       media_download_timestamp, media_download_error
+	       media_download_timestamp, media_download_error,
+	       quoted_message_id, quoted_sender_jid, quoted_text, quoted_sender_name
 	FROM messages_with_names
 	WHERE chat_jid = ? AND timestamp < ?
 	ORDER BY timestamp DESC
@@ -269,7 +311,8 @@ func (s *MessageStore) GetChatMessagesWithNamesFiltered(
 	       text, timestamp, is_from_me, message_type,
 	       media_file_path, media_file_name, media_file_size, media_mime_type,
 	       media_width, media_height, media_duration, media_download_status,
-	       media_download_timestamp, media_download_error
+	       media_download_timestamp, media_download_error,
+	       quoted_message_id, quoted_sender_jid, quoted_text, quoted_sender_name
 	FROM messages_with_names
 	WHERE chat_jid = ?
 	`
@@ -312,6 +355,7 @@ func (s *MessageStore) scanMessages(rows *sql.Rows) ([]Message, error) {
 	for rows.Next() {
 		var msg Message
 		var timestampUnix int64
+		var quotedMessageID, quotedSenderJID, quotedText sql.NullString
 
 		err := rows.Scan(
 			&msg.ID,
@@ -321,12 +365,18 @@ func (s *MessageStore) scanMessages(rows *sql.Rows) ([]Message, error) {
 			&timestampUnix,
 			&msg.IsFromMe,
 			&msg.MessageType,
+			&quotedMessageID,
+			&quotedSenderJID,
+			&quotedText,
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		msg.Timestamp = time.Unix(timestampUnix, 0)
+		msg.QuotedMessageID = quotedMessageID.String
+		msg.QuotedSenderJID = quotedSenderJID.String
+		msg.QuotedText = quotedText.String
 		messages = append(messages, msg)
 	}
 
@@ -394,7 +444,8 @@ func (s *MessageStore) SearchMessagesWithNames(q string, limit int) ([]MessageWi
 	       text, timestamp, is_from_me, message_type,
 	       media_file_path, media_file_name, media_file_size, media_mime_type,
 	       media_width, media_height, media_duration, media_download_status,
-	       media_download_timestamp, media_download_error
+	       media_download_timestamp, media_download_error,
+	       quoted_message_id, quoted_sender_jid, quoted_text, quoted_sender_name
 	FROM messages_with_names
 	WHERE text LIKE ?
 	ORDER BY timestamp DESC
@@ -418,7 +469,8 @@ func (s *MessageStore) GetChatMessagesWithNames(chatJID string, limit int, offse
 	       text, timestamp, is_from_me, message_type,
 	       media_file_path, media_file_name, media_file_size, media_mime_type,
 	       media_width, media_height, media_duration, media_download_status,
-	       media_download_timestamp, media_download_error
+	       media_download_timestamp, media_download_error,
+	       quoted_message_id, quoted_sender_jid, quoted_text, quoted_sender_name
 	FROM messages_with_names
 	WHERE chat_jid = ?
 	ORDER BY timestamp DESC
@@ -449,6 +501,9 @@ func (s *MessageStore) scanMessagesWithNames(rows *sql.Rows) ([]MessageWithNames
 		var mediaDownloadStatus, mediaDownloadError sql.NullString
 		var mediaDownloadTimestamp sql.NullInt64
 
+		// quote-reply parent fields (nullable)
+		var quotedMessageID, quotedSenderJID, quotedText, quotedSenderName sql.NullString
+
 		err := rows.Scan(
 			&msg.ID,
 			&msg.ChatJID,
@@ -471,12 +526,21 @@ func (s *MessageStore) scanMessagesWithNames(rows *sql.Rows) ([]MessageWithNames
 			&mediaDownloadStatus,
 			&mediaDownloadTimestamp,
 			&mediaDownloadError,
+			// quote-reply fields
+			&quotedMessageID,
+			&quotedSenderJID,
+			&quotedText,
+			&quotedSenderName,
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		msg.Timestamp = time.Unix(timestampUnix, 0)
+		msg.QuotedMessageID = quotedMessageID.String
+		msg.QuotedSenderJID = quotedSenderJID.String
+		msg.QuotedText = quotedText.String
+		msg.QuotedSenderName = quotedSenderName.String
 
 		// populate media metadata if present
 		if mediaFileName.Valid && mediaMimeType.Valid {

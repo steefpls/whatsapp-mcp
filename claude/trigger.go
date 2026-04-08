@@ -367,8 +367,21 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 	// COMPACTION: if the prior turn pushed this session past the token threshold,
 	// summarize the existing session into a fresh one before processing the user's message.
 	// This mirrors Claude Code's /compact behavior: preserve a dense summary, drop tool-use bloat.
+	//
+	// Loop guard: never compact two turns in a row. The post-compact prompt naturally lands
+	// close to the threshold (framing + summary + recent messages + Claude Code's cache_read floor),
+	// so without this guard one fat session triggers an infinite compact-respond-compact chain
+	// whenever the user keeps pinging.
+	needsCompaction := isResume && session != nil && t.config.CompactThreshold > 0 && session.LastInputTokens >= t.config.CompactThreshold
+	if needsCompaction && session.JustCompacted {
+		t.log.Printf("[CLAUDE] Session %s for %s exceeded threshold (%d >= %d) but was just compacted last turn — skipping to avoid loop",
+			session.SessionID, chatJID, session.LastInputTokens, t.config.CompactThreshold)
+		needsCompaction = false
+	}
+
 	var prompt string
-	if isResume && session != nil && t.config.CompactThreshold > 0 && session.LastInputTokens >= t.config.CompactThreshold {
+	var freshAfterCompact bool
+	if needsCompaction {
 		t.log.Printf("[CLAUDE] Session %s for %s exceeded threshold (%d >= %d), compacting",
 			session.SessionID, chatJID, session.LastInputTokens, t.config.CompactThreshold)
 
@@ -396,6 +409,7 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 			t.log.Printf("[CLAUDE] Compaction successful, starting fresh session %s for %s (summary: %d chars)",
 				sessionID, chatJID, len(summary))
 		}
+		freshAfterCompact = true
 	} else if isResume {
 		t.log.Printf("[CLAUDE] Resuming session %s for chat %s (%d new messages, last_tokens=%d)",
 			sessionID, chatJID, len(promptMessages), session.LastInputTokens)
@@ -443,6 +457,7 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 			NewestMsgTime:   messages[0].Timestamp, // newest message in the full batch
 			LastUsed:        time.Now(),
 			LastInputTokens: tokens,
+			JustCompacted:   freshAfterCompact,
 		})
 	}
 
@@ -554,7 +569,7 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	b.WriteString(triggerText)
 	b.WriteString("\n===== END USER MESSAGE =====\n\n")
 	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	fmt.Fprintf(&b, "BACKGROUND CONTEXT: Before you respond, silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), follow up with `get_entity` to load the full observation list — the top-3 hits often miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to (their relationship to Steve, ongoing topics, preferences, history). This is internal context only — DO NOT mention that you searched memory, DO NOT cite or quote the memory results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is unavailable, skip silently and proceed normally.\n\n", senderName, chatName)
+	fmt.Fprintf(&b, "BACKGROUND CONTEXT — MANDATORY MEMORY FETCH: Before you respond, YOU MUST silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. This is not optional. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), YOU MUST follow up with `get_entity` to load the full observation list — the top-3 hits routinely miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to (their relationship to Steve, ongoing topics, preferences, history). This is internal context only — DO NOT mention that you searched memory, DO NOT cite or quote the memory results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is genuinely unavailable (tool errors, not just empty results), skip silently and proceed normally.\n\n", senderName, chatName)
 	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
@@ -571,6 +586,14 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 // the summary in place of raw message history.
 func (t *Trigger) buildPostCompactPrompt(chatJID string, messages []storage.MessageWithNames, triggerText, senderName string, isOwner bool, summary string) string {
 	var b strings.Builder
+
+	// after compaction the summary covers full chat history; only include the most recent
+	// messages verbatim for actionable context. Keeping this small is what stops the
+	// post-compact prompt body from immediately re-tripping the threshold next turn.
+	const postCompactMaxMessages = 40
+	if len(messages) > postCompactMaxMessages {
+		messages = messages[:postCompactMaxMessages]
+	}
 
 	b.WriteString("You are responding to a WhatsApp message. A user mentioned @claude in a WhatsApp chat.\n\n")
 
@@ -615,7 +638,7 @@ func (t *Trigger) buildPostCompactPrompt(chatJID string, messages []storage.Mess
 	b.WriteString(triggerText)
 	b.WriteString("\n===== END USER MESSAGE =====\n\n")
 	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	fmt.Fprintf(&b, "BACKGROUND CONTEXT: Before you respond, silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), follow up with `get_entity` to load the full observation list — the top-3 hits often miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to. This is internal context only — DO NOT mention that you searched memory, DO NOT cite the results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back or memory-index is unavailable, proceed silently.\n\n", senderName, chatName)
+	fmt.Fprintf(&b, "BACKGROUND CONTEXT — MANDATORY MEMORY REFETCH AFTER COMPACTION: The summary above may NAME people and topics, but it does NOT contain their full memory entities — those were dropped during compaction. YOU MUST silently re-call the memory-index MCP `search_memory` tool (vault: \"work\") right now to reload them. This is not optional and the summary is not a substitute. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), YOU MUST follow up with `get_entity` to load the full observation list — the top-3 hits routinely miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to. This is internal context only — DO NOT mention that you searched memory, DO NOT cite the results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is genuinely unavailable (tool errors, not just empty results), skip silently and proceed normally.\n\n", senderName, chatName)
 	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
@@ -679,6 +702,24 @@ func (t *Trigger) writeMessages(b *strings.Builder, messages []storage.MessageWi
 			msg.Timestamp.Format("2006-01-02 15:04:05"),
 			sender,
 			msg.Text)
+
+		// surface quote-reply context so Claude knows what the message was answering
+		if msg.QuotedMessageID != "" {
+			quoteSender := msg.QuotedSenderName
+			if quoteSender == "" {
+				quoteSender = msg.QuotedSenderJID
+			}
+			if quoteSender == "" {
+				quoteSender = "earlier message"
+			}
+			// flatten + truncate the parent body so a long quote can't blow up token count
+			parent := strings.ReplaceAll(msg.QuotedText, "\n", " ")
+			const maxQuoteChars = 200
+			if len(parent) > maxQuoteChars {
+				parent = parent[:maxQuoteChars] + "…"
+			}
+			fmt.Fprintf(b, "    ↩️ in reply to %s: %q\n", quoteSender, parent)
+		}
 
 		// surface media attachments so Claude can see (and read) them
 		if meta := msg.MediaMetadata; meta != nil {
