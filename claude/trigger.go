@@ -242,7 +242,7 @@ var signatures = []string{
 	"\n\n— _robot-stamped by @claude_ 🤖✅",
 	"\n\n— _@claude: ctrl+c, ctrl+slay_ ⌨️💅",
 	"\n\n— _this has been a @claude production_ 🎬",
-	"\n\n— _@claude: I read all 100 messages for this_ 📚",
+	"\n\n— _@claude: I read all 40 messages for this_ 📚",
 }
 
 func getSignature() string {
@@ -320,8 +320,8 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 	chatLock.Lock()
 	defer chatLock.Unlock()
 
-	// fetch last 100 messages for context
-	messages, err := t.getHistory(chatJID, 100, 0)
+	// fetch last 40 messages for context
+	messages, err := t.getHistory(chatJID, 40, 0)
 	if err != nil {
 		t.log.Printf("[CLAUDE] Failed to get history for %s: %v", chatJID, err)
 		t.trySendError(ctx, chatJID, ackID, ackErr)
@@ -350,6 +350,13 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 
 			for _, msg := range messages {
 				if msg.Timestamp.After(session.NewestMsgTime) {
+					// skip Claude's own responses — they're already in the
+					// session transcript via --resume, so including them
+					// again is pure token waste. All Claude responses carry
+					// a signature line containing "— _@claude".
+					if msg.IsFromMe && strings.Contains(msg.Text, "\n\n— _@claude") {
+						continue
+					}
 					promptMessages = append(promptMessages, msg)
 				}
 			}
