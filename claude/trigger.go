@@ -19,11 +19,12 @@ import (
 
 // claudeJSONResult is the envelope returned by `claude -p --output-format json`.
 type claudeJSONResult struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	IsError bool   `json:"is_error"`
-	Result  string `json:"result"`
-	Usage   struct {
+	Type     string `json:"type"`
+	Subtype  string `json:"subtype"`
+	IsError  bool   `json:"is_error"`
+	Result   string `json:"result"`
+	NumTurns int    `json:"num_turns"`
+	Usage    struct {
 		InputTokens              int `json:"input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
@@ -31,10 +32,16 @@ type claudeJSONResult struct {
 	} `json:"usage"`
 }
 
-// totalContextTokens returns the full context size for a turn (fresh + cache read + cache write).
-// This is what we compare against the compaction threshold.
+// totalContextTokens estimates the actual context window size for the final
+// API call. The top-level usage fields are AGGREGATED across all API turns
+// (tool-use rounds) in the invocation, so dividing by num_turns gives the
+// approximate per-call context — which is what we need for compaction decisions.
 func (r *claudeJSONResult) totalContextTokens() int {
-	return r.Usage.InputTokens + r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens
+	total := r.Usage.InputTokens + r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens
+	if r.NumTurns > 1 {
+		return total / r.NumTurns
+	}
+	return total
 }
 
 // thinkingMessages are randomly selected when Claude starts processing a request.
@@ -832,10 +839,11 @@ func (t *Trigger) execClaude(ctx context.Context, prompt string, sessionID strin
 		return "", parsed.totalContextTokens(), fmt.Errorf("claude CLI returned is_error=true: %s", parsed.Result)
 	}
 
+	rawTotal := parsed.Usage.InputTokens + parsed.Usage.CacheCreationInputTokens + parsed.Usage.CacheReadInputTokens
 	tokens := parsed.totalContextTokens()
-	t.log.Printf("[CLAUDE] Turn complete: input=%d cache_create=%d cache_read=%d total_context=%d output=%d",
-		parsed.Usage.InputTokens, parsed.Usage.CacheCreationInputTokens, parsed.Usage.CacheReadInputTokens,
-		tokens, parsed.Usage.OutputTokens)
+	t.log.Printf("[CLAUDE] Turn complete: num_turns=%d input=%d cache_create=%d cache_read=%d raw_total=%d est_context=%d output=%d",
+		parsed.NumTurns, parsed.Usage.InputTokens, parsed.Usage.CacheCreationInputTokens, parsed.Usage.CacheReadInputTokens,
+		rawTotal, tokens, parsed.Usage.OutputTokens)
 
 	return parsed.Result, tokens, nil
 }
