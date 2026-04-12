@@ -10,3 +10,13 @@ qr.png
 
 # stray scratch files at repo root (this is a Go project — no Python at root)
 /*.py
+
+# Windows stackdumps
+*.stackdump
+
+# Editor/build backup files
+*~
+
+# Claude-generated scratch files (legacy — new ones go to data/claude-work/)
+/*.txt
+/*.md

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"whatsapp-mcp/storage"
@@ -827,6 +828,16 @@ func (t *Trigger) execClaude(ctx context.Context, prompt string, sessionID strin
 		t.config.ClaudePath, model, sessionID, isResume)
 
 	cmd := exec.CommandContext(ctx, t.config.ClaudePath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x00000010, // CREATE_NEW_CONSOLE
+	}
+
+	// Run Claude in an isolated scratch directory so any files it creates
+	// (study guides, haikus, etc.) don't pollute the repo root.
+	workDir := filepath.Join("data", "claude-work")
+	os.MkdirAll(workDir, 0755)
+	cmd.Dir = workDir
+
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
