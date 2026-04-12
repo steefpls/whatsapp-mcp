@@ -835,7 +835,11 @@ func (t *Trigger) writeMCPConfig() (string, error) {
 		return "", fmt.Errorf("failed to write MCP config: %w", err)
 	}
 
-	return f.Name(), nil
+	absPath, err := filepath.Abs(f.Name())
+	if err != nil {
+		return f.Name(), nil // fall back to relative if Abs fails
+	}
+	return absPath, nil
 }
 
 // execClaude spawns the Claude CLI and returns its output text plus the total
