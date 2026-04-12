@@ -260,6 +260,7 @@ type Trigger struct {
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
 	isTrusted  func(jid string) (bool, error)
 	store      *storage.MessageStore
+	mediaStore *storage.MediaStore
 	sessionMgr *SessionManager
 	log        *log.Logger
 }
@@ -274,6 +275,7 @@ func NewTrigger(
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error),
 	isTrusted func(jid string) (bool, error),
 	store *storage.MessageStore,
+	mediaStore *storage.MediaStore,
 	sessionMgr *SessionManager,
 ) *Trigger {
 	return &Trigger{
@@ -285,8 +287,59 @@ func NewTrigger(
 		getHistory: getHistory,
 		isTrusted:  isTrusted,
 		store:      store,
+		mediaStore: mediaStore,
 		sessionMgr: sessionMgr,
 		log:        log.Default(),
+	}
+}
+
+// waitForPendingMedia polls media metadata for messages with "pending" download
+// status, waiting up to the given timeout for them to resolve. It updates the
+// MediaMetadata pointers in-place so the caller's message slice reflects the
+// final download state.
+func (t *Trigger) waitForPendingMedia(messages []storage.MessageWithNames, timeout time.Duration) {
+	if t.mediaStore == nil {
+		return
+	}
+
+	// collect indices of messages with pending media
+	var pending []int
+	for i, msg := range messages {
+		if msg.MediaMetadata != nil && msg.MediaMetadata.DownloadStatus == "pending" {
+			pending = append(pending, i)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	t.log.Printf("[CLAUDE] Waiting for %d pending media download(s) (timeout %s)", len(pending), timeout)
+	deadline := time.Now().Add(timeout)
+	pollInterval := 500 * time.Millisecond
+
+	for len(pending) > 0 && time.Now().Before(deadline) {
+		time.Sleep(pollInterval)
+
+		remaining := pending[:0]
+		for _, i := range pending {
+			meta, err := t.mediaStore.GetMediaMetadata(messages[i].ID)
+			if err != nil || meta == nil {
+				remaining = append(remaining, i) // keep waiting
+				continue
+			}
+			if meta.DownloadStatus == "pending" {
+				remaining = append(remaining, i) // still pending
+				continue
+			}
+			// resolved — update in place
+			messages[i].MediaMetadata = meta
+			t.log.Printf("[CLAUDE] Media %s resolved → %s", messages[i].ID, meta.DownloadStatus)
+		}
+		pending = remaining
+	}
+
+	if len(pending) > 0 {
+		t.log.Printf("[CLAUDE] %d media download(s) still pending after timeout", len(pending))
 	}
 }
 
@@ -333,6 +386,9 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 		t.trySendError(ctx, chatJID, ackID, ackErr)
 		return
 	}
+
+	// wait for any in-flight media downloads to finish so Claude can see them
+	t.waitForPendingMedia(messages, 10*time.Second)
 
 	// determine session state: resume existing or start new
 	session := t.sessionMgr.GetSession(chatJID)
