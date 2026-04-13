@@ -270,8 +270,15 @@ func (c *Client) parseHistoryMessage(chatJID types.JID, msg *waWeb.WebMessageInf
 				text = "[Location]"
 			} else if message.GetReactionMessage() != nil || message.GetEncReactionMessage() != nil {
 				text = "[Reaction]"
-			} else if message.GetProtocolMessage() != nil {
-				text = "[Protocol]"
+			} else if proto := message.GetProtocolMessage(); proto != nil {
+				if edited := proto.GetEditedMessage(); edited != nil {
+					text = extractText(edited)
+					if text == "" {
+						text = "[Edited message]"
+					}
+				} else {
+					text = "[Protocol]"
+				}
 			} else {
 				c.log.Warnf("unknown message type in history: %v", message)
 				text = "[Unknown message type]"
@@ -368,6 +375,34 @@ func (c *Client) handleMessage(evt *events.Message) {
 	if evt.Message.GetSenderKeyDistributionMessage() != nil {
 		c.log.Debugf("Skipping sender key distribution message (internal protocol)")
 		return
+	}
+
+	// handle message edits: update original message in DB, don't save new entry
+	if proto := evt.Message.GetProtocolMessage(); proto != nil {
+		if edited := proto.GetEditedMessage(); edited != nil {
+			editedKey := proto.GetKey()
+			if editedKey != nil && editedKey.GetID() != "" {
+				newText := extractText(edited)
+				if newText != "" {
+					if err := c.store.UpdateMessageText(editedKey.GetID(), newText); err != nil {
+						c.log.Errorf("Failed to update edited message %s: %v", editedKey.GetID(), err)
+					} else {
+						c.log.Infof("Updated edited message %s with new text", editedKey.GetID())
+					}
+					// check for @claude trigger on the edited text
+					if c.claudeTrigger != nil && strings.Contains(strings.ToLower(newText), "@claude") {
+						chatJID := c.normalizeJID(info.Chat)
+						senderJID := c.normalizeJID(info.Sender)
+						senderName := info.PushName
+						if senderName == "" {
+							senderName = senderJID
+						}
+						go c.claudeTrigger.HandleTrigger(c.ctx, chatJID, senderJID, newText, senderName, info.IsFromMe)
+					}
+				}
+			}
+			return
+		}
 	}
 
 	// extract media metadata (if exists)
@@ -1021,7 +1056,12 @@ func (c *Client) getTypeFromMessage(msg *waE2E.Message) string {
 		return "poll"
 	case getMediaTypeFromMessage(msg) != "":
 		return "media"
-	case msg.Conversation != nil, msg.ExtendedTextMessage != nil, msg.ProtocolMessage != nil:
+	case msg.ProtocolMessage != nil:
+		if msg.ProtocolMessage.GetEditedMessage() != nil {
+			return "text"
+		}
+		return "protocol"
+	case msg.Conversation != nil, msg.ExtendedTextMessage != nil:
 		return "text"
 	default:
 		c.log.Warnf("unknown message type: %v", msg)
