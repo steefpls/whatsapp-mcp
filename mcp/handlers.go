@@ -229,6 +229,13 @@ func (m *MCPServer) handleGetChatMessages(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("failed to get messages: %v", err)), nil
 	}
 
+	// collect message IDs for batch edit-history lookup
+	var msgIDs []string
+	for _, msg := range messages {
+		msgIDs = append(msgIDs, msg.ID)
+	}
+	editHistories, _ := m.store.GetEditHistoryForMessages(msgIDs)
+
 	// format response: oldest first, compact lines
 	var result strings.Builder
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -254,6 +261,13 @@ func (m *MCPServer) handleGetChatMessages(ctx context.Context, request mcp.CallT
 		// captioned media: put media on an indented line below
 		if msg.Text != "" && msg.MediaMetadata != nil {
 			fmt.Fprintf(&result, "    %s\n", formatMediaLine(msg.MediaMetadata, msg.ID))
+		}
+
+		// show edit history if this message was edited
+		if edits, ok := editHistories[msg.ID]; ok && len(edits) > 0 {
+			for j, e := range edits {
+				fmt.Fprintf(&result, "    ✏️ edit %d at %s: \"%s\" → \"%s\"\n", j+1, m.formatTime(e.EditedAt), e.OldText, e.NewText)
+			}
 		}
 	}
 

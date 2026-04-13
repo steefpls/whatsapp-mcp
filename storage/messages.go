@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -81,6 +82,13 @@ func nullableString(s string) any {
 	return s
 }
 
+// EditHistory represents one edit event for a message.
+type EditHistory struct {
+	OldText  string
+	NewText  string
+	EditedAt time.Time
+}
+
 // UpdateMessageText updates only the text column of an existing message,
 // preserving sender, timestamp, and all other metadata. Used by the @claude
 // trigger to patch the local DB after a successful WhatsApp edit, since
@@ -92,6 +100,82 @@ func (s *MessageStore) UpdateMessageText(id string, newText string) error {
 		return fmt.Errorf("failed to update message text: %w", err)
 	}
 	return nil
+}
+
+// SaveEditHistory records an edit event: the old text, new text, and when it happened.
+func (s *MessageStore) SaveEditHistory(messageID, oldText, newText string, editedAt time.Time) error {
+	_, err := s.db.Exec(
+		`INSERT INTO message_edits (message_id, old_text, new_text, edited_at) VALUES (?, ?, ?, ?)`,
+		messageID, oldText, newText, editedAt.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to save edit history: %w", err)
+	}
+	return nil
+}
+
+// GetEditHistory returns all edits for a message, oldest first.
+func (s *MessageStore) GetEditHistory(messageID string) ([]EditHistory, error) {
+	rows, err := s.db.Query(
+		`SELECT old_text, new_text, edited_at FROM message_edits WHERE message_id = ? ORDER BY edited_at ASC`,
+		messageID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get edit history: %w", err)
+	}
+	defer rows.Close()
+
+	var edits []EditHistory
+	for rows.Next() {
+		var e EditHistory
+		var ts int64
+		if err := rows.Scan(&e.OldText, &e.NewText, &ts); err != nil {
+			return nil, err
+		}
+		e.EditedAt = time.Unix(ts, 0)
+		edits = append(edits, e)
+	}
+	return edits, rows.Err()
+}
+
+// GetEditHistoryForMessages returns edit histories for multiple message IDs.
+// Returns a map of messageID -> []EditHistory.
+func (s *MessageStore) GetEditHistoryForMessages(messageIDs []string) (map[string][]EditHistory, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+
+	// build placeholder list
+	placeholders := make([]string, len(messageIDs))
+	args := make([]any, len(messageIDs))
+	for i, id := range messageIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(
+		`SELECT message_id, old_text, new_text, edited_at FROM message_edits WHERE message_id IN (%s) ORDER BY edited_at ASC`,
+		strings.Join(placeholders, ","),
+	)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get edit histories: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]EditHistory)
+	for rows.Next() {
+		var msgID string
+		var e EditHistory
+		var ts int64
+		if err := rows.Scan(&msgID, &e.OldText, &e.NewText, &ts); err != nil {
+			return nil, err
+		}
+		e.EditedAt = time.Unix(ts, 0)
+		result[msgID] = append(result[msgID], e)
+	}
+	return result, rows.Err()
 }
 
 // SaveBulk saves multiple messages in a single transaction.

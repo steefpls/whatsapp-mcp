@@ -377,17 +377,28 @@ func (c *Client) handleMessage(evt *events.Message) {
 		return
 	}
 
-	// handle message edits: update original message in DB, don't save new entry
+	// handle message edits: save history, then update original message in DB
 	if proto := evt.Message.GetProtocolMessage(); proto != nil {
 		if edited := proto.GetEditedMessage(); edited != nil {
 			editedKey := proto.GetKey()
 			if editedKey != nil && editedKey.GetID() != "" {
 				newText := extractText(edited)
 				if newText != "" {
+					// fetch old text before overwriting so we can record the edit history
+					oldMsg, _ := c.store.GetMessageByID(editedKey.GetID())
+					oldText := ""
+					if oldMsg != nil {
+						oldText = oldMsg.Text
+					}
+
 					if err := c.store.UpdateMessageText(editedKey.GetID(), newText); err != nil {
 						c.log.Errorf("Failed to update edited message %s: %v", editedKey.GetID(), err)
 					} else {
 						c.log.Infof("Updated edited message %s with new text", editedKey.GetID())
+						// record the edit history
+						if err := c.store.SaveEditHistory(editedKey.GetID(), oldText, newText, info.Timestamp); err != nil {
+							c.log.Errorf("Failed to save edit history for %s: %v", editedKey.GetID(), err)
+						}
 					}
 					// check for @claude trigger on the edited text
 					if c.claudeTrigger != nil && strings.Contains(strings.ToLower(newText), "@claude") {
