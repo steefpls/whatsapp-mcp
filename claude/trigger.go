@@ -889,7 +889,7 @@ func (t *Trigger) execClaude(ctx context.Context, prompt string, sessionID strin
 
 	cmd := exec.CommandContext(ctx, t.config.ClaudePath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: 0x00000010, // CREATE_NEW_CONSOLE
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
 	}
 
 	// Run Claude in an isolated scratch directory so any files it creates
