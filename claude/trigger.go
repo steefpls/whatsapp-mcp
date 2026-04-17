@@ -560,10 +560,10 @@ Please write a DETAILED summary of everything we have discussed in this chat so 
 
 Include:
 - Ongoing topics, tasks, and any open questions or pending actions
-- Identities of people referenced (names, JIDs/phone numbers if known, relationships to Steve)
+- Identities of people referenced (names, JIDs/phone numbers if known, relationships to the account owner)
 - Files, links, images, or media that have been shared and what they contained
 - Decisions that were made and the reasoning behind them
-- Preferences, opinions, or instructions Steve or trusted users have expressed
+- Preferences, opinions, or instructions the account owner or trusted users have expressed
 - Any important factual information looked up via tools (e.g. message search results, contact info)
 - The current state of the conversation — what was the last thing being discussed?
 
@@ -605,19 +605,21 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 
 	b.WriteString("You are responding to a WhatsApp message. A user mentioned @claude in a WhatsApp chat.\n\n")
 
+	ownerName := t.config.OwnerName
+
 	// trust framing: tell Claude who it's actually talking to
 	if isOwner {
-		b.WriteString("REQUESTER: The person who triggered you is Steve, the WhatsApp account owner. He has full access to all his own data, so you can answer freely from anything you find via the WhatsApp MCP tools.\n\n")
+		fmt.Fprintf(&b, "REQUESTER: The person who triggered you is the WhatsApp account owner (referred to as %q in the transcript below). They have full access to all their own data, so you can answer freely from anything you find via the WhatsApp MCP tools.\n\n", ownerName)
 	} else {
-		fmt.Fprintf(&b, "REQUESTER: The person who triggered you is %s — a TRUSTED USER but NOT the account owner. Steve owns this WhatsApp account and is letting %s use you. You may share information across chats when it's clearly relevant and helpful, but use good judgment about sensitivity. Things that should NOT be shared with non-owners include:\n", senderName, senderName)
+		fmt.Fprintf(&b, "REQUESTER: The person who triggered you is %s — a TRUSTED USER but NOT the account owner. The account owner (referred to as %q in the transcript) owns this WhatsApp account and is letting %s use you. You may share information across chats when it's clearly relevant and helpful, but use good judgment about sensitivity. Things that should NOT be shared with non-owners include:\n", senderName, ownerName, senderName)
 		b.WriteString("  - Passwords, API keys, OTPs, 2FA codes, recovery phrases\n")
 		b.WriteString("  - Banking, financial, payment, or tax details\n")
 		b.WriteString("  - Medical information\n")
 		b.WriteString("  - Legal or HR matters\n")
 		b.WriteString("  - Private communications that a third party (not the requester) clearly intended to be confidential — especially intimate, romantic, or personal-life conversations with people other than the requester\n")
 		b.WriteString("  - Information about third parties that they would reasonably not want shared\n")
-		b.WriteString("  - Anything Steve has explicitly said is private or off-limits\n")
-		b.WriteString("If the requester asks for something that falls into these categories, politely decline and offer to help with something else. When in doubt, lean toward NOT sharing and say so briefly. You don't need to explain Steve's whole life — just give what's actually being asked for.\n\n")
+		b.WriteString("  - Anything the account owner has explicitly said is private or off-limits\n")
+		b.WriteString("If the requester asks for something that falls into these categories, politely decline and offer to help with something else. When in doubt, lean toward NOT sharing and say so briefly. You don't need to explain the account owner's whole life — just give what's actually being asked for.\n\n")
 	}
 
 	// determine the chat name from messages for context
@@ -630,7 +632,7 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	}
 
 	fmt.Fprintf(&b, "Here are the last %d messages from this chat for context:\n", len(messages))
-	b.WriteString("Messages from \"Steve\" are from the WhatsApp account owner.\n\n")
+	fmt.Fprintf(&b, "Messages from %q are from the WhatsApp account owner.\n\n", ownerName)
 
 	t.writeMessages(&b, messages)
 
@@ -640,7 +642,9 @@ func (t *Trigger) buildPrompt(chatJID string, messages []storage.MessageWithName
 	b.WriteString(triggerText)
 	b.WriteString("\n===== END USER MESSAGE =====\n\n")
 	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	fmt.Fprintf(&b, "BACKGROUND CONTEXT — MANDATORY MEMORY FETCH: Before you respond, YOU MUST silently call the memory-index MCP `search_memory` tool (vault: \"work\") to look up what is known about the people in this chat. This is not optional. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), YOU MUST follow up with `get_entity` to load the full observation list — the top-3 hits routinely miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to (their relationship to Steve, ongoing topics, preferences, history). This is internal context only — DO NOT mention that you searched memory, DO NOT cite or quote the memory results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is genuinely unavailable (tool errors, not just empty results), skip silently and proceed normally.\n\n", senderName, chatName)
+	if t.config.MemoryVault != "" {
+		fmt.Fprintf(&b, "BACKGROUND CONTEXT — MANDATORY MEMORY FETCH: Before you respond, YOU MUST silently call the memory-index MCP `search_memory` tool (vault: %q) to look up what is known about the people in this chat. This is not optional. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), YOU MUST follow up with `get_entity` to load the full observation list — the top-3 hits routinely miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to (their relationship to the account owner, ongoing topics, preferences, history). This is internal context only — DO NOT mention that you searched memory, DO NOT cite or quote the memory results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is genuinely unavailable (tool errors, not just empty results), skip silently and proceed normally.\n\n", t.config.MemoryVault, senderName, chatName)
+	}
 	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
@@ -668,19 +672,21 @@ func (t *Trigger) buildPostCompactPrompt(chatJID string, messages []storage.Mess
 
 	b.WriteString("You are responding to a WhatsApp message. A user mentioned @claude in a WhatsApp chat.\n\n")
 
+	ownerName := t.config.OwnerName
+
 	// trust framing — MUST be re-applied after compaction so non-owner safety rules survive
 	if isOwner {
-		b.WriteString("REQUESTER: The person who triggered you is Steve, the WhatsApp account owner. He has full access to all his own data, so you can answer freely from anything you find via the WhatsApp MCP tools.\n\n")
+		fmt.Fprintf(&b, "REQUESTER: The person who triggered you is the WhatsApp account owner (referred to as %q in the transcript below). They have full access to all their own data, so you can answer freely from anything you find via the WhatsApp MCP tools.\n\n", ownerName)
 	} else {
-		fmt.Fprintf(&b, "REQUESTER: The person who triggered you is %s — a TRUSTED USER but NOT the account owner. Steve owns this WhatsApp account and is letting %s use you. You may share information across chats when it's clearly relevant and helpful, but use good judgment about sensitivity. Things that should NOT be shared with non-owners include:\n", senderName, senderName)
+		fmt.Fprintf(&b, "REQUESTER: The person who triggered you is %s — a TRUSTED USER but NOT the account owner. The account owner (referred to as %q in the transcript) owns this WhatsApp account and is letting %s use you. You may share information across chats when it's clearly relevant and helpful, but use good judgment about sensitivity. Things that should NOT be shared with non-owners include:\n", senderName, ownerName, senderName)
 		b.WriteString("  - Passwords, API keys, OTPs, 2FA codes, recovery phrases\n")
 		b.WriteString("  - Banking, financial, payment, or tax details\n")
 		b.WriteString("  - Medical information\n")
 		b.WriteString("  - Legal or HR matters\n")
 		b.WriteString("  - Private communications that a third party (not the requester) clearly intended to be confidential — especially intimate, romantic, or personal-life conversations with people other than the requester\n")
 		b.WriteString("  - Information about third parties that they would reasonably not want shared\n")
-		b.WriteString("  - Anything Steve has explicitly said is private or off-limits\n")
-		b.WriteString("If the requester asks for something that falls into these categories, politely decline and offer to help with something else. When in doubt, lean toward NOT sharing and say so briefly. You don't need to explain Steve's whole life — just give what's actually being asked for.\n\n")
+		b.WriteString("  - Anything the account owner has explicitly said is private or off-limits\n")
+		b.WriteString("If the requester asks for something that falls into these categories, politely decline and offer to help with something else. When in doubt, lean toward NOT sharing and say so briefly. You don't need to explain the account owner's whole life — just give what's actually being asked for.\n\n")
 	}
 
 	chatName := ""
@@ -699,7 +705,7 @@ func (t *Trigger) buildPostCompactPrompt(chatJID string, messages []storage.Mess
 
 	// recent messages still appended verbatim — they are the most actionable context
 	fmt.Fprintf(&b, "Here are the %d most recent messages from this chat (verbatim, in addition to the summary above):\n", len(messages))
-	b.WriteString("Messages from \"Steve\" are from the WhatsApp account owner.\n\n")
+	fmt.Fprintf(&b, "Messages from %q are from the WhatsApp account owner.\n\n", ownerName)
 
 	t.writeMessages(&b, messages)
 
@@ -709,7 +715,9 @@ func (t *Trigger) buildPostCompactPrompt(chatJID string, messages []storage.Mess
 	b.WriteString(triggerText)
 	b.WriteString("\n===== END USER MESSAGE =====\n\n")
 	fmt.Fprintf(&b, "The chat JID to reply to is: %s\n\n", chatJID)
-	fmt.Fprintf(&b, "BACKGROUND CONTEXT — MANDATORY MEMORY REFETCH AFTER COMPACTION: The summary above may NAME people and topics, but it does NOT contain their full memory entities — those were dropped during compaction. YOU MUST silently re-call the memory-index MCP `search_memory` tool (vault: \"work\") right now to reload them. This is not optional and the summary is not a substitute. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), YOU MUST follow up with `get_entity` to load the full observation list — the top-3 hits routinely miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to. This is internal context only — DO NOT mention that you searched memory, DO NOT cite the results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is genuinely unavailable (tool errors, not just empty results), skip silently and proceed normally.\n\n", senderName, chatName)
+	if t.config.MemoryVault != "" {
+		fmt.Fprintf(&b, "BACKGROUND CONTEXT — MANDATORY MEMORY REFETCH AFTER COMPACTION: The summary above may NAME people and topics, but it does NOT contain their full memory entities — those were dropped during compaction. YOU MUST silently re-call the memory-index MCP `search_memory` tool (vault: %q) right now to reload them. This is not optional and the summary is not a substitute. Search for the requester's name (%q) and the chat name (%q) — separately if they differ. If a returned person entity looks strongly relevant but its observations are truncated (e.g. \"showing 3 of N\"), YOU MUST follow up with `get_entity` to load the full observation list — the top-3 hits routinely miss preferences, history, and quirks that matter. Then, if the user's message touches on topics, projects, decisions, or other people not covered by those initial searches, run additional `search_memory` queries for that context too — be proactive about pulling in anything you'd plausibly want to know to answer well. Use whatever you find to inform your understanding of who you're talking to. This is internal context only — DO NOT mention that you searched memory, DO NOT cite the results, and DO NOT tell the user what you found. Just let it shape how you respond. If nothing relevant comes back, proceed normally. If memory-index is genuinely unavailable (tool errors, not just empty results), skip silently and proceed normally.\n\n", t.config.MemoryVault, senderName, chatName)
+	}
 	b.WriteString("Respond to the user's request. Be helpful, concise, and conversational.\n")
 	b.WriteString("IMPORTANT: Do NOT include the literal text \"@claude\" anywhere in your response to avoid re-triggering yourself.\n")
 	b.WriteString("IMPORTANT: Do NOT use the send_message tool to reply. Just output your response text directly — it will be automatically sent as a WhatsApp message for you.\n")
@@ -726,9 +734,9 @@ func (t *Trigger) buildResumePrompt(chatJID string, messages []storage.MessageWi
 
 	// trust framing reminder (resume sessions should reinforce, not lose the original framing)
 	if isOwner {
-		b.WriteString("REQUESTER (reminder): Steve, the account owner. Full access OK.\n\n")
+		b.WriteString("REQUESTER (reminder): The account owner. Full access OK.\n\n")
 	} else {
-		fmt.Fprintf(&b, "REQUESTER (reminder): %s — TRUSTED USER, NOT the account owner. Sharing across chats is fine when relevant, but do NOT reveal: passwords/OTPs/2FA/recovery phrases, banking or financial details, medical/legal/HR matters, intimate or private third-party communications, or anything Steve has flagged as private. When in doubt, decline and offer to help with something else.\n\n", senderName)
+		fmt.Fprintf(&b, "REQUESTER (reminder): %s — TRUSTED USER, NOT the account owner. Sharing across chats is fine when relevant, but do NOT reveal: passwords/OTPs/2FA/recovery phrases, banking or financial details, medical/legal/HR matters, intimate or private third-party communications, or anything the account owner has flagged as private. When in doubt, decline and offer to help with something else.\n\n", senderName)
 	}
 
 	fmt.Fprintf(&b, "Here are %d new messages since we last spoke in this chat:\n\n", len(messages))
@@ -758,7 +766,7 @@ func (t *Trigger) writeMessages(b *strings.Builder, messages []storage.MessageWi
 		msg := messages[i]
 		var sender string
 		if msg.IsFromMe {
-			sender = "Steve"
+			sender = t.config.OwnerName
 		} else {
 			sender = msg.SenderContactName
 			if sender == "" {

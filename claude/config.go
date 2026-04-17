@@ -17,6 +17,8 @@ type TriggerConfig struct {
 	Timeout            time.Duration // max time to wait for Claude response
 	MCPPort            string        // WhatsApp MCP server port
 	MCPAPIKey          string        // WhatsApp MCP server API key
+	OwnerName          string        // display name for account-owner messages in transcripts and prompt framing
+	MemoryVault        string        // memory-index vault name; empty = skip the memory-fetch prompt block
 }
 
 // LoadConfig loads trigger configuration from environment variables.
@@ -31,5 +33,7 @@ func LoadConfig() TriggerConfig {
 		Timeout:          time.Duration(config.GetEnvInt("CLAUDE_TIMEOUT_SECONDS", 300)) * time.Second,
 		MCPPort:          config.GetEnv("MCP_PORT", "8080"),
 		MCPAPIKey:        config.GetEnv("MCP_API_KEY", "change-me-in-production"),
+		OwnerName:        config.GetEnv("OWNER_NAME", "Owner"),
+		MemoryVault:      config.GetEnv("MEMORY_VAULT", ""),
 	}
 }
