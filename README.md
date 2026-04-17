@@ -353,6 +353,8 @@ The `@claude` trigger feature spawns a headless Claude Code CLI instance when so
 | `CLAUDE_TIMEOUT_SECONDS` | `300` | Max seconds to wait for a response |
 | `CLAUDE_COMPACT_THRESHOLD_TOKENS` | `120000` | Prior-turn context above this mints a compacted fresh session on the next trigger |
 | `CLAUDE_COMPACT_MODEL` | `haiku` | Model used to summarize the existing session during auto-compaction |
+| `OWNER_NAME` | `Owner` | Display name used for your own (account-owner) messages in the transcript and prompt framing — set to your first name for natural output |
+| `MEMORY_VAULT` | *(empty)* | Optional: name of a [memory-index](https://github.com/steefpls/memory-index) vault to silently consult on new sessions for background context about chat participants. Empty disables the memory-fetch prompt block entirely. |
 
 **Access control:** The WhatsApp account owner can always trigger `@claude`. Other users must be added via the `add_trusted_user` MCP tool. Untrusted users get a polite rejection message.
 
@@ -368,7 +370,7 @@ The fork adds meaningful machinery around the headless Claude spawn — it's not
 
 - **Trust framing + prompt-injection fence.** The prompt distinguishes owner vs. trusted-user contexts and wraps incoming WhatsApp content in a fence so message bodies can't override system instructions.
 
-- **Silent memory lookup.** On new sessions, the trigger silently consults `memory-index` for context about the chat's participants before Claude replies, so background facts surface without the user asking.
+- **Silent memory lookup (optional).** When `MEMORY_VAULT` is set, the trigger silently consults [memory-index](https://github.com/steefpls/memory-index) — a personal MCP knowledge graph — on new sessions for background context about the chat's participants before Claude replies, so known facts surface without the user asking. Leave the env var empty if you don't run memory-index and the prompt block is skipped entirely.
 
 - **Quote-replies and edits.** WhatsApp quote-reply context is captured and passed through, and message edits are tracked with before/after text in the DB rather than being shown as raw `[Protocol]` stubs.
 
