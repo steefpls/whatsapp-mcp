@@ -154,10 +154,20 @@ func (m *MCPServer) handleMediaResource(ctx context.Context, req mcp.ReadResourc
 		return nil, fmt.Errorf("failed to read media file: %w", err)
 	}
 
-	// encode to base64 for transmission
-	encodedData := base64.StdEncoding.EncodeToString(fileData)
+	// return text content inline for text-ish mime types so the
+	// client doesn't save it as a .bin blob and refuse to read it
+	if isTextMimeType(meta.MimeType) {
+		return []mcp.ResourceContents{
+			mcp.TextResourceContents{
+				URI:      uri,
+				MIMEType: meta.MimeType,
+				Text:     string(fileData),
+			},
+		}, nil
+	}
 
-	// return the file as a blob so AI assistants can view it
+	// otherwise base64-encode as a binary blob
+	encodedData := base64.StdEncoding.EncodeToString(fileData)
 	return []mcp.ResourceContents{
 		mcp.BlobResourceContents{
 			URI:      uri,
@@ -165,4 +175,23 @@ func (m *MCPServer) handleMediaResource(ctx context.Context, req mcp.ReadResourc
 			Blob:     encodedData,
 		},
 	}, nil
+}
+
+// isTextMimeType reports whether the given MIME type should be
+// returned as inline text rather than a base64 blob.
+func isTextMimeType(mimeType string) bool {
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	switch mimeType {
+	case "application/json",
+		"application/xml",
+		"application/javascript",
+		"application/typescript",
+		"application/x-sh",
+		"application/x-yaml",
+		"application/yaml":
+		return true
+	}
+	return false
 }
