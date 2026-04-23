@@ -111,6 +111,22 @@ func (m *MCPServer) registerTools() {
 		m.handleSendFile,
 	)
 
+	// 5c. send emoji reaction to a message
+	m.server.AddTool(
+		mcp.NewTool("send_reaction",
+			mcp.WithDescription("React to a message with an emoji. Pass an empty emoji to remove a previous reaction."),
+			mcp.WithString("message_id",
+				mcp.Required(),
+				mcp.Description("ID of the message to react to (from get_chat_messages or search_messages)"),
+			),
+			mcp.WithString("emoji",
+				mcp.Required(),
+				mcp.Description("emoji to react with (e.g., \"👍\", \"❤️\"). Empty string removes the reaction."),
+			),
+		),
+		m.handleSendReaction,
+	)
+
 	// 6. load more messages on-demand
 	m.server.AddTool(
 		mcp.NewTool("load_more_messages",

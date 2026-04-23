@@ -408,12 +408,18 @@ func (c *Client) handleMessage(evt *events.Message) {
 						if senderName == "" {
 							senderName = senderJID
 						}
-						go c.claudeTrigger.HandleTrigger(c.ctx, chatJID, senderJID, newText, senderName, info.IsFromMe)
+						go c.claudeTrigger.HandleTrigger(c.ctx, chatJID, senderJID, editedKey.GetID(), newText, senderName, info.IsFromMe)
 					}
 				}
 			}
 			return
 		}
+	}
+
+	// handle reactions: persist to reactions table, don't store as a message
+	if evt.Message.GetReactionMessage() != nil || evt.Message.GetEncReactionMessage() != nil {
+		c.handleReaction(ctx, evt)
+		return
 	}
 
 	// extract media metadata (if exists)
@@ -485,7 +491,7 @@ func (c *Client) handleMessage(evt *events.Message) {
 		if senderName == "" {
 			senderName = senderJID
 		}
-		go c.claudeTrigger.HandleTrigger(c.ctx, chatJID, senderJID, data.Text, senderName, data.IsFromMe)
+		go c.claudeTrigger.HandleTrigger(c.ctx, chatJID, senderJID, data.MessageID, data.Text, senderName, data.IsFromMe)
 	}
 
 	if mediaMetadata != nil {
@@ -568,6 +574,58 @@ func (c *Client) handleMessage(evt *events.Message) {
 			c.log.Errorf("Failed to emit webhook event: %v", err)
 		}
 	}
+}
+
+// handleReaction persists an incoming reaction to the reactions table.
+// Handles both plaintext ReactionMessage and encrypted EncReactionMessage
+// (used in community announcement groups).
+func (c *Client) handleReaction(ctx context.Context, evt *events.Message) {
+	var reaction *waE2E.ReactionMessage
+
+	if r := evt.Message.GetReactionMessage(); r != nil {
+		reaction = r
+	} else if evt.Message.GetEncReactionMessage() != nil {
+		decrypted, err := c.wa.DecryptReaction(ctx, evt)
+		if err != nil {
+			c.log.Warnf("Failed to decrypt reaction from %s: %v", evt.Info.Sender, err)
+			return
+		}
+		reaction = decrypted
+	}
+
+	if reaction == nil || reaction.GetKey() == nil {
+		return
+	}
+
+	targetMsgID := reaction.GetKey().GetID()
+	if targetMsgID == "" {
+		return
+	}
+
+	reactorJID := c.normalizeJID(evt.Info.Sender)
+	emoji := reaction.GetText()
+
+	if emoji == "" {
+		// empty emoji == reaction removed
+		if err := c.store.DeleteReaction(targetMsgID, reactorJID, evt.Info.Timestamp); err != nil {
+			c.log.Errorf("Failed to delete reaction on %s by %s: %v", targetMsgID, reactorJID, err)
+		} else {
+			c.log.Debugf("Removed reaction on %s by %s", targetMsgID, reactorJID)
+		}
+		return
+	}
+
+	r := storage.Reaction{
+		TargetMessageID: targetMsgID,
+		ReactorJID:      reactorJID,
+		Emoji:           emoji,
+		Timestamp:       evt.Info.Timestamp,
+	}
+	if err := c.store.UpsertReaction(r); err != nil {
+		c.log.Errorf("Failed to save reaction %s on %s by %s: %v", emoji, targetMsgID, reactorJID, err)
+		return
+	}
+	c.log.Debugf("Saved reaction %s on %s by %s", emoji, targetMsgID, reactorJID)
 }
 
 // handleGroupInfo processes group info updates like name changes.

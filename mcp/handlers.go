@@ -111,6 +111,30 @@ func formatDuration(seconds *int) string {
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
+// formatReactionLine returns a compact line summarizing reactions on a message,
+// e.g. "    💬 ❤️ Andrea, 👍 You". Returns empty string if there are no reactions.
+// pushNames maps JID -> display name; missing entries fall back to JID.
+// If myJID is non-empty and a reactor's JID matches it, that reactor is
+// rendered as "You".
+func formatReactionLine(reactions []storage.Reaction, pushNames map[string]string, myJID string) string {
+	if len(reactions) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(reactions))
+	for _, r := range reactions {
+		var name string
+		if myJID != "" && r.ReactorJID == myJID {
+			name = "You"
+		} else if n := pushNames[r.ReactorJID]; n != "" {
+			name = n
+		} else {
+			name = r.ReactorJID
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", r.Emoji, name))
+	}
+	return "    💬 " + strings.Join(parts, ", ")
+}
+
 // formatMediaLine returns a single compact line describing media metadata.
 // Includes the media URI when downloaded, or a status tag otherwise.
 func formatMediaLine(meta *storage.MediaMetadata, msgID string) string {
@@ -229,12 +253,17 @@ func (m *MCPServer) handleGetChatMessages(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("failed to get messages: %v", err)), nil
 	}
 
-	// collect message IDs for batch edit-history lookup
+	// collect message IDs for batch edit-history and reaction lookup
 	var msgIDs []string
 	for _, msg := range messages {
 		msgIDs = append(msgIDs, msg.ID)
 	}
 	editHistories, _ := m.store.GetEditHistoryForMessages(msgIDs)
+	reactionsByMsg, _ := m.store.GetReactionsForMessages(msgIDs)
+	var reactorNames map[string]string
+	if len(reactionsByMsg) > 0 {
+		reactorNames, _ = m.store.LoadAllPushNames()
+	}
 
 	// format response: oldest first, compact lines
 	var result strings.Builder
@@ -256,7 +285,7 @@ func (m *MCPServer) handleGetChatMessages(ctx context.Context, request mcp.CallT
 			// media-only message: put media on the main line
 			text = formatMediaLine(msg.MediaMetadata, msg.ID)
 		}
-		fmt.Fprintf(&result, "%s %s %s: %s\n", m.formatTime(msg.Timestamp), direction, sender, text)
+		fmt.Fprintf(&result, "%s [%s] %s %s: %s\n", m.formatTime(msg.Timestamp), msg.ID, direction, sender, text)
 
 		// captioned media: put media on an indented line below
 		if msg.Text != "" && msg.MediaMetadata != nil {
@@ -267,6 +296,13 @@ func (m *MCPServer) handleGetChatMessages(ctx context.Context, request mcp.CallT
 		if edits, ok := editHistories[msg.ID]; ok && len(edits) > 0 {
 			for j, e := range edits {
 				fmt.Fprintf(&result, "    ✏️ edit %d at %s: \"%s\" → \"%s\"\n", j+1, m.formatTime(e.EditedAt), e.OldText, e.NewText)
+			}
+		}
+
+		// show reactions if any
+		if reactions, ok := reactionsByMsg[msg.ID]; ok {
+			if line := formatReactionLine(reactions, reactorNames, m.wa.MyJID()); line != "" {
+				fmt.Fprintf(&result, "%s\n", line)
 			}
 		}
 	}
@@ -302,6 +338,17 @@ func (m *MCPServer) handleSearchMessages(ctx context.Context, request mcp.CallTo
 		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
+	// batch-fetch reactions for all hits
+	msgIDs := make([]string, len(messages))
+	for i, msg := range messages {
+		msgIDs[i] = msg.ID
+	}
+	reactionsByMsg, _ := m.store.GetReactionsForMessages(msgIDs)
+	var reactorNames map[string]string
+	if len(reactionsByMsg) > 0 {
+		reactorNames, _ = m.store.LoadAllPushNames()
+	}
+
 	// group messages by chat to avoid repeating the chat JID per message
 	sort.SliceStable(messages, func(i, j int) bool {
 		if messages[i].ChatJID != messages[j].ChatJID {
@@ -334,9 +381,15 @@ func (m *MCPServer) handleSearchMessages(ctx context.Context, request mcp.CallTo
 		if text == "" && msg.MediaMetadata != nil {
 			text = formatMediaLine(msg.MediaMetadata, msg.ID)
 		}
-		fmt.Fprintf(&result, "  %s %s: %s\n", m.formatDateTime(msg.Timestamp), sender, text)
+		fmt.Fprintf(&result, "  %s [%s] %s: %s\n", m.formatDateTime(msg.Timestamp), msg.ID, sender, text)
 		if msg.Text != "" && msg.MediaMetadata != nil {
 			fmt.Fprintf(&result, "      %s\n", formatMediaLine(msg.MediaMetadata, msg.ID))
+		}
+		if reactions, ok := reactionsByMsg[msg.ID]; ok {
+			if line := formatReactionLine(reactions, reactorNames, m.wa.MyJID()); line != "" {
+				// formatReactionLine emits 4-space indent; bump to 6 to match search's nesting
+				fmt.Fprintf(&result, "  %s\n", line)
+			}
 		}
 	}
 
@@ -428,6 +481,38 @@ func (m *MCPServer) handleSendFile(ctx context.Context, request mcp.CallToolRequ
 	return mcp.NewToolResultText(
 		fmt.Sprintf("Sent %s to %s (message ID: %s)", kind, chatJID, msgID),
 	), nil
+}
+
+// handleSendReaction handles the send_reaction tool request.
+func (m *MCPServer) handleSendReaction(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	messageID, err := request.RequireString("message_id")
+	if err != nil {
+		return mcp.NewToolResultError("message_id parameter is required"), nil
+	}
+
+	// emoji is required by tool schema, but allow empty string to remove a reaction
+	emoji := request.GetString("emoji", "")
+
+	if !m.wa.IsLoggedIn() {
+		return mcp.NewToolResultError("WhatsApp is not connected"), nil
+	}
+
+	msg, err := m.store.GetMessageByID(messageID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to look up message: %v", err)), nil
+	}
+	if msg == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("message %s not found in local database", messageID)), nil
+	}
+
+	if err := m.wa.SendReaction(ctx, msg.ChatJID, msg.ID, msg.SenderJID, emoji); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to send reaction: %v", err)), nil
+	}
+
+	if emoji == "" {
+		return mcp.NewToolResultText(fmt.Sprintf("Removed reaction on message %s in %s", msg.ID, msg.ChatJID)), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Reacted %s to message %s in %s", emoji, msg.ID, msg.ChatJID)), nil
 }
 
 // handleLoadMoreMessages handles the load_more_messages tool request.

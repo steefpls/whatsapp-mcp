@@ -252,17 +252,19 @@ func getSignature() string {
 
 // Trigger handles spawning headless Claude Code CLI instances for @claude mentions.
 type Trigger struct {
-	config     TriggerConfig
-	sendMsg    func(ctx context.Context, chatJID string, text string) error
-	sendMsgID  func(ctx context.Context, chatJID string, text string) (string, error)
-	revokeMsg  func(ctx context.Context, chatJID string, messageID string) error
-	editMsg    func(ctx context.Context, chatJID string, messageID string, newText string) error
-	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
-	isTrusted  func(jid string) (bool, error)
-	store      *storage.MessageStore
-	mediaStore *storage.MediaStore
-	sessionMgr *SessionManager
-	log        *log.Logger
+	config       TriggerConfig
+	sendMsg      func(ctx context.Context, chatJID string, text string) error
+	sendMsgID    func(ctx context.Context, chatJID string, text string) (string, error)
+	revokeMsg    func(ctx context.Context, chatJID string, messageID string) error
+	editMsg      func(ctx context.Context, chatJID string, messageID string, newText string) error
+	sendReaction func(ctx context.Context, chatJID, messageID, senderJID, emoji string) error
+	myJID        func() string // returns our own WhatsApp JID (empty if not logged in)
+	getHistory   func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error)
+	isTrusted    func(jid string) (bool, error)
+	store        *storage.MessageStore
+	mediaStore   *storage.MediaStore
+	sessionMgr   *SessionManager
+	log          *log.Logger
 }
 
 // NewTrigger creates a new Claude trigger.
@@ -272,6 +274,8 @@ func NewTrigger(
 	sendMsgID func(ctx context.Context, chatJID string, text string) (string, error),
 	revokeMsg func(ctx context.Context, chatJID string, messageID string) error,
 	editMsg func(ctx context.Context, chatJID string, messageID string, newText string) error,
+	sendReaction func(ctx context.Context, chatJID, messageID, senderJID, emoji string) error,
+	myJID func() string,
 	getHistory func(chatJID string, limit int, offset int) ([]storage.MessageWithNames, error),
 	isTrusted func(jid string) (bool, error),
 	store *storage.MessageStore,
@@ -279,17 +283,19 @@ func NewTrigger(
 	sessionMgr *SessionManager,
 ) *Trigger {
 	return &Trigger{
-		config:     config,
-		sendMsg:    sendMsg,
-		sendMsgID:  sendMsgID,
-		revokeMsg:  revokeMsg,
-		editMsg:    editMsg,
-		getHistory: getHistory,
-		isTrusted:  isTrusted,
-		store:      store,
-		mediaStore: mediaStore,
-		sessionMgr: sessionMgr,
-		log:        log.Default(),
+		config:       config,
+		sendMsg:      sendMsg,
+		sendMsgID:    sendMsgID,
+		revokeMsg:    revokeMsg,
+		editMsg:      editMsg,
+		sendReaction: sendReaction,
+		myJID:        myJID,
+		getHistory:   getHistory,
+		isTrusted:    isTrusted,
+		store:        store,
+		mediaStore:   mediaStore,
+		sessionMgr:   sessionMgr,
+		log:          log.Default(),
 	}
 }
 
@@ -344,7 +350,7 @@ func (t *Trigger) waitForPendingMedia(messages []storage.MessageWithNames, timeo
 }
 
 // HandleTrigger processes an @claude mention. Runs synchronously — caller should invoke in a goroutine.
-func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, senderName string, isFromMe bool) {
+func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, messageID, text, senderName string, isFromMe bool) {
 	// access control: owner always allowed, others must be trusted
 	if !isFromMe {
 		trusted, err := t.isTrusted(senderJID)
@@ -358,6 +364,21 @@ func (t *Trigger) HandleTrigger(ctx context.Context, chatJID, senderJID, text, s
 				t.log.Printf("[CLAUDE] Failed to send rejection to %s: %v", chatJID, err)
 			}
 			return
+		}
+	}
+
+	// react 👀 on the trigger message to signal "I see you, working on it",
+	// then clear the reaction when this handler returns
+	if t.sendReaction != nil && messageID != "" {
+		if err := t.sendReaction(ctx, chatJID, messageID, senderJID, "👀"); err != nil {
+			t.log.Printf("[CLAUDE] Failed to send 👀 reaction on %s: %v", messageID, err)
+		} else {
+			defer func() {
+				// use a fresh background context — the request ctx may be cancelled by now
+				if err := t.sendReaction(context.Background(), chatJID, messageID, senderJID, ""); err != nil {
+					t.log.Printf("[CLAUDE] Failed to clear 👀 reaction on %s: %v", messageID, err)
+				}
+			}()
 		}
 	}
 
@@ -764,6 +785,20 @@ func (t *Trigger) buildResumePrompt(chatJID string, messages []storage.MessageWi
 
 // writeMessages formats messages oldest-first into the builder.
 func (t *Trigger) writeMessages(b *strings.Builder, messages []storage.MessageWithNames) {
+	// batch-load reactions and reactor names so we can surface them inline
+	var reactionsByMsg map[string][]storage.Reaction
+	var reactorNames map[string]string
+	if t.store != nil && len(messages) > 0 {
+		ids := make([]string, len(messages))
+		for i, msg := range messages {
+			ids[i] = msg.ID
+		}
+		reactionsByMsg, _ = t.store.GetReactionsForMessages(ids)
+		if len(reactionsByMsg) > 0 {
+			reactorNames, _ = t.store.LoadAllPushNames()
+		}
+	}
+
 	// messages come newest-first from DB, display oldest-first
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
@@ -820,6 +855,27 @@ func (t *Trigger) writeMessages(b *strings.Builder, messages []storage.MessageWi
 			default:
 				b.WriteString("\n")
 			}
+		}
+
+		// surface reactions on this message
+		if reactions := reactionsByMsg[msg.ID]; len(reactions) > 0 {
+			var ownJID string
+			if t.myJID != nil {
+				ownJID = t.myJID()
+			}
+			parts := make([]string, 0, len(reactions))
+			for _, r := range reactions {
+				var name string
+				if ownJID != "" && r.ReactorJID == ownJID {
+					name = t.config.OwnerName
+				} else if n := reactorNames[r.ReactorJID]; n != "" {
+					name = n
+				} else {
+					name = r.ReactorJID
+				}
+				parts = append(parts, fmt.Sprintf("%s %s", r.Emoji, name))
+			}
+			fmt.Fprintf(b, "    💬 %s\n", strings.Join(parts, ", "))
 		}
 	}
 }

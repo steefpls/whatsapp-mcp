@@ -28,7 +28,7 @@ type WebhookManager interface {
 
 // ClaudeTrigger defines the interface for handling @claude mentions in messages.
 type ClaudeTrigger interface {
-	HandleTrigger(ctx context.Context, chatJID, senderJID, text, senderName string, isFromMe bool)
+	HandleTrigger(ctx context.Context, chatJID, senderJID, messageID, text, senderName string, isFromMe bool)
 }
 
 // Client wraps the WhatsApp client with additional functionality.
@@ -167,6 +167,16 @@ func (c *Client) IsLoggedIn() bool {
 	return c.wa.Store.ID != nil
 }
 
+// MyJID returns the logged-in user's JID (without device suffix), or empty
+// string if not logged in. Used by renderers that want to display "You" for
+// self-attributed entries (e.g., own reactions).
+func (c *Client) MyJID() string {
+	if c.wa.Store.ID == nil {
+		return ""
+	}
+	return c.wa.Store.ID.ToNonAD().String()
+}
+
 // Connect establishes a connection to WhatsApp.
 func (c *Client) Connect() error {
 	return c.wa.Connect()
@@ -265,6 +275,48 @@ func (c *Client) EditMessage(ctx context.Context, chatJID string, messageID stri
 
 	_, err = c.wa.SendMessage(ctx, targetJID, editMsg)
 	return err
+}
+
+// SendReaction sends an emoji reaction to a message. Pass an empty emoji to
+// remove a previously-sent reaction. senderJID is the JID of the original
+// message's author (used to build the reaction's MessageKey).
+func (c *Client) SendReaction(ctx context.Context, chatJID, messageID, senderJID, emoji string) error {
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid chat JID: %w", err)
+	}
+	sender, err := types.ParseJID(senderJID)
+	if err != nil {
+		return fmt.Errorf("invalid sender JID: %w", err)
+	}
+
+	reactionMsg := c.wa.BuildReaction(chat, sender, messageID, emoji)
+	if _, err := c.wa.SendMessage(ctx, chat, reactionMsg); err != nil {
+		return err
+	}
+
+	// persist our own reaction locally — outbound reactions don't echo back as
+	// inbound events, so without this the reactions table never sees them
+	if c.wa.Store.ID == nil {
+		return nil
+	}
+	myJID := c.wa.Store.ID.ToNonAD().String()
+	now := time.Now()
+	if emoji == "" {
+		if err := c.store.DeleteReaction(messageID, myJID, now); err != nil {
+			c.log.Warnf("SendReaction: failed to persist reaction removal on %s: %v", messageID, err)
+		}
+	} else {
+		if err := c.store.UpsertReaction(storage.Reaction{
+			TargetMessageID: messageID,
+			ReactorJID:      myJID,
+			Emoji:           emoji,
+			Timestamp:       now,
+		}); err != nil {
+			c.log.Warnf("SendReaction: failed to persist reaction on %s: %v", messageID, err)
+		}
+	}
+	return nil
 }
 
 // SendFile uploads a local file and sends it to a chat as the appropriate
